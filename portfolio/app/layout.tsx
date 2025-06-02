@@ -13,7 +13,6 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 starColor={[255, 255, 255]}
                 starCount={3000}
             />
-        <Header />
         {children}
       </body>
     </html>
