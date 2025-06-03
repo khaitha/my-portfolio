@@ -1,11 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: "export", // if you’re exporting a static site
+  output: "export",
   eslint: {
-    // This tells Next.js to skip ESLint errors at build time
-    ignoreDuringBuilds: true,
+    ignoreDuringBuilds: true, // skip ESLint errors at build time
   },
-  // …any other settings…
+  // …any other config you had…
 };
 
 module.exports = nextConfig;
