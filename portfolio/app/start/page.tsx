@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://192.168.1.13:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api";
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
