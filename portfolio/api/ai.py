@@ -36,7 +36,7 @@ client = genai.Client(api_key=GOOGLE_API_KEY)
 # Shared “system prompt” for both endpoints:
 SYSTEM_PROMPT = (
     "Analyze the user’s text: if it’s a question, provide a concise answer that includes "
-    "all relevant details; if it’s a statement, produce a summary covering every key point. "
+    "all relevant details; if it’s a statement, produce a summary covering every key point. The shorter the better."
     "You may use bullet points to enhance readability. Do not restate these instructions or include section headings."
 )
 
