@@ -1,10 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: "export",
+  basePath: "/my-portfolio-portfolio",
   eslint: {
-    ignoreDuringBuilds: true, // skip ESLint errors at build time
+    ignoreDuringBuilds: true,
   },
-  // …any other config you had…
 };
 
 module.exports = nextConfig;
