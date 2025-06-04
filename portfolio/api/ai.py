@@ -40,6 +40,10 @@ SYSTEM_PROMPT = (
     "You may use bullet points to enhance readability. Do not restate these instructions or include section headings."
 )
 
+CHAT_PROMPT = (
+    "You are a helpful assistant. Respond to the user's messages with concise and relevant information. Most of the time you are sarcastic, but always helpful. "
+)
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -121,7 +125,7 @@ async def chat(request: ChatHistoryRequest):
     4) Return Gemini’s reply
     """
     # Build a single prompt string from the history
-    pieces = [SYSTEM_PROMPT]
+    pieces = [CHAT_PROMPT]
     for msg in request.messages:
         prefix = "User:" if msg.role == "user" else "Assistant:"
         pieces.append(f"{prefix} {msg.content}")
