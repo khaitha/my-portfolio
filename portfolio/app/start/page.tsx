@@ -19,17 +19,34 @@ export default function UploadPage() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState<string>("");
 
+  // Session state - THIS WAS MISSING
+  const [sessionId, setSessionId] = useState<string>("");
+  const [pdfFilename, setPdfFilename] = useState<string>("");
+
   const handlePdfSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file || pdfLoading) return;
-    setPdfError(""); setPdfOutput(""); setPdfLoading(true);
+    setPdfError(""); 
+    setPdfOutput(""); 
+    setPdfLoading(true);
+    
     try {
       const form = new FormData();
       form.append("file", file);
       const res = await fetch(`${API_URL}/upload`, { method: "POST", body: form });
       const data = await res.json();
-      if (data.error) setPdfError(data.error);
-      else setPdfOutput(data.result);
+      
+      if (data.error) {
+        setPdfError(data.error);
+      } else {
+        setPdfOutput(data.result);
+        setSessionId(data.session_id); // Store session_id
+        setPdfFilename(data.filename); // Store filename
+        console.log("Session ID:", data.session_id); // Debug log
+        
+        // Clear chat history when new PDF is uploaded
+        setChatMessages([]);
+      }
     } catch (err: any) {
       setPdfError(err.message);
     } finally {
@@ -53,11 +70,18 @@ export default function UploadPage() {
       const res = await fetch(`${API_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: updatedHistory }),
+        body: JSON.stringify({ 
+          messages: updatedHistory,
+          session_id: sessionId // Send session_id if available
+        }),
       });
       const data = await res.json();
-      if (data.result) {
-        setChatMessages((h) => [...h, { role: "assistant", content: data.result }]);
+      
+      if (data.error) {
+        setChatError(data.error);
+      } else if (data.result) {
+        const assistantMsg: ChatMessage = { role: "assistant", content: data.result };
+        setChatMessages([...updatedHistory, assistantMsg]);
       } else {
         setChatError("No response from server.");
       }
@@ -99,26 +123,51 @@ export default function UploadPage() {
         </form>
         {pdfError && <p className="mt-2 text-red-600">{pdfError}</p>}
         {pdfOutput && (
-          <pre className="mt-4 p-4 bg-gray-900 text-white rounded whitespace-pre-wrap">
-            {pdfOutput}
-          </pre>
+          <div className="mt-4">
+            <pre className="p-4 bg-gray-900 text-white rounded whitespace-pre-wrap">
+              {pdfOutput}
+            </pre>
+            {/* Show PDF context status */}
+            {sessionId && (
+              <div className="mt-2 p-2 bg-green-100 border border-green-300 rounded text-green-800 text-sm">
+                ✓ PDF "{pdfFilename}" is ready for chat. Ask questions about the document below!
+              </div>
+            )}
+          </div>
         )}
       </div>
 
       {/* Chat Bot Card */}
       <div className="w-full max-w-2xl bg-white rounded-2xl shadow-lg p-8">
-        <h2 className="text-2xl font-bold mb-4 text-black">Chat</h2>
+        <h2 className="text-2xl font-bold mb-4 text-black">
+          Chat {sessionId && pdfFilename && (
+            <span className="text-sm font-normal text-gray-600">
+              (discussing: {pdfFilename})
+            </span>
+          )}
+        </h2>
         <div className="h-64 overflow-y-auto mb-4 space-y-2 text-black">
-          {chatMessages.map((m, i) => (
-            <div
-              key={i}
-              className={`p-2 rounded ${
-                m.role === "user" ? "bg-blue-500 self-end" : "bg-green-500 self-start"
-              }`}
-            >
-              {m.content}
+          {chatMessages.length === 0 ? (
+            <div className="text-gray-500 text-center py-8">
+              {sessionId ? 
+                "Ask questions about your uploaded PDF..." : 
+                "Upload a PDF first, or start a general conversation..."
+              }
             </div>
-          ))}
+          ) : (
+            chatMessages.map((m, i) => (
+              <div
+                key={i}
+                className={`p-3 rounded-lg max-w-[80%] ${
+                  m.role === "user" 
+                    ? "bg-blue-500 text-white ml-auto" 
+                    : "bg-gray-200 text-black mr-auto"
+                }`}
+              >
+                <div className="whitespace-pre-wrap">{m.content}</div>
+              </div>
+            ))
+          )}
         </div>
         <form onSubmit={handleChatSubmit} className="flex gap-2 text-black">
           <input
@@ -126,7 +175,7 @@ export default function UploadPage() {
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             disabled={chatLoading}
-            placeholder="Ask a question…"
+            placeholder={sessionId ? "Ask about your PDF..." : "Ask a question..."}
             className="flex-1 border rounded px-3 py-2 text-black"
           />
           <button

@@ -84,7 +84,7 @@ CHAT_WITH_PDF_PROMPT = (
 
 GENERAL_CHAT_PROMPT = (
     "You are a helpful assistant. Respond to the user's messages with concise and relevant information. "
-    "Be friendly and always helpful. Keep replies short and to the point. "
+    "Be somewhat sarcastic but always helpful. Keep replies short and to the point. "
 )
 
 app = FastAPI()
