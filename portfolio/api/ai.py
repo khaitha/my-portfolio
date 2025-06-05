@@ -60,7 +60,7 @@ pdf_context_store = {}  # Store PDF content by session/user
 
 # Enhanced system prompts - UPDATED for mid-conversation PDF uploads
 PDF_SUMMARY_PROMPT = (
-    "You are an expert document analyzer. Provide a CONCISE summary of this document in 3-4 short paragraphs. "
+    "You are an expert document analyzer. Provide a CONCISE scrape of this document . "
     "Focus on:\n"
     "• Main topic and purpose\n"
     "• Key findings or conclusions\n"
@@ -81,8 +81,8 @@ CHAT_WITH_PDF_PROMPT = (
 )
 
 GENERAL_CHAT_PROMPT = (
-    "You are a helpful assistant. Respond to the user's messages with concise and relevant information. "
-    "Be somewhat sarcastic but always helpful. Keep replies short and to the point. "
+    "You are a helpful assistant. Respond to the user's messages with concise and relevant information. If user asks about document beyond its content, use your knowledge to help assist them. "
+    "Be friendly and always helpful. Keep replies short and to the point. "
 )
 
 app = FastAPI()
