@@ -58,26 +58,24 @@ def log_memory(stage: str):
 request_count = 0
 pdf_context_store = {}  # Store PDF content by session/user
 
-# Enhanced system prompts for different purposes
+# Enhanced system prompts - UPDATED for mid-conversation PDF uploads
 PDF_SUMMARY_PROMPT = (
-    "You are an expert document analyzer. Please provide a comprehensive and detailed summary of the following document. "
-    "Include:\n"
-    "• Main topics and themes\n"
-    "• Key points and important details\n"
-    "• Significant findings, conclusions, or recommendations\n"
-    "• Any data, statistics, or evidence presented\n"
-    "• Document structure and organization\n"
-    "• Context and background information\n\n"
-    "Make the summary informative, well-structured, and capture the essence of the document while being thorough. "
-    "Use bullet points and clear sections where appropriate.\n\n"
+    "You are an expert document analyzer. Provide a CONCISE summary of this document in 3-4 short paragraphs. "
+    "Focus on:\n"
+    "• Main topic and purpose\n"
+    "• Key findings or conclusions\n"
+    "• Important data or statistics (if any)\n"
+    "• Practical implications\n\n"
+    "Keep it brief and actionable. Use clear, simple language.\n\n"
     "Document content:\n"
 )
 
 CHAT_WITH_PDF_PROMPT = (
-    "You are a helpful AI assistant with access to a PDF document that the user has uploaded. "
+    "You are a helpful AI assistant with access to a PDF document that the user has uploaded during our conversation. "
     "Answer questions about the document content, provide clarifications, and help the user understand the material. "
     "Always reference specific parts of the document when relevant. "
-    "If the user asks something not covered in the document, let them know politely.\n\n"
+    "If the user asks something not covered in the document, let them know politely. "
+    "Keep responses concise but informative.\n\n"
     "PDF CONTENT:\n{pdf_content}\n\n"
     "CONVERSATION:\n"
 )
@@ -213,7 +211,7 @@ def generate_session_id() -> str:
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     """
-    Enhanced PDF upload with detailed summarization and context storage
+    Enhanced PDF upload that can be used mid-conversation
     """
     log_memory("UPLOAD_START")
     
@@ -245,16 +243,16 @@ async def upload_pdf(file: UploadFile = File(...)):
             return {"error": "No text extracted from PDF."}
 
         try:
-            # Limit text size for processing
-            MAX_TEXT_SIZE = 80000  # Increased for more detailed analysis
+            # Reduce text size for CONCISE summary
+            MAX_TEXT_SIZE = 40000  # Reduced for shorter summaries
             if len(pdf_text) > MAX_TEXT_SIZE:
                 truncated_text = pdf_text[:MAX_TEXT_SIZE] + "\n\n... (Document continues but was truncated for processing)"
                 logger.info(f"Text truncated to {MAX_TEXT_SIZE} characters for summarization")
             else:
                 truncated_text = pdf_text
             
-            # Generate detailed summary
-            prompt = f"{PDF_SUMMARY_PROMPT}{truncated_text}"
+            # Generate CONCISE summary
+            prompt = f"{PDF_SUMMARY_PROMPT}{truncated_text}\n\nRemember: Keep the summary to 3-4 paragraphs maximum."
             
             log_memory("BEFORE_AI_CALL")
 
@@ -272,8 +270,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             session_id = generate_session_id()
             
             # Store the full PDF text (not truncated) for chat context
-            # But limit storage to prevent memory issues
-            MAX_STORAGE_SIZE = 50000  # 50KB for chat context
+            MAX_STORAGE_SIZE = 30000  # Reduced to save memory
             if len(pdf_text) > MAX_STORAGE_SIZE:
                 stored_text = pdf_text[:MAX_STORAGE_SIZE] + "\n\n... (Document continues)"
             else:
@@ -286,10 +283,10 @@ async def upload_pdf(file: UploadFile = File(...)):
                 "summary": cleaned_summary
             }
             
-            # Clean up old sessions (keep only last 10)
-            if len(pdf_context_store) > 10:
+            # Clean up old sessions (keep only last 5)
+            if len(pdf_context_store) > 5:
                 oldest_sessions = sorted(pdf_context_store.keys(), 
-                                       key=lambda x: pdf_context_store[x]["timestamp"])[:len(pdf_context_store)-10]
+                                       key=lambda x: pdf_context_store[x]["timestamp"])[:len(pdf_context_store)-5]
                 for old_session in oldest_sessions:
                     del pdf_context_store[old_session]
             
@@ -303,11 +300,13 @@ async def upload_pdf(file: UploadFile = File(...)):
             log_memory("UPLOAD_SUCCESS")
             logger.info("File processing completed successfully")
             
+            # Return response optimized for mid-conversation use
             return {
                 "result": cleaned_summary,
                 "session_id": session_id,
                 "filename": file.filename,
-                "message": "PDF processed successfully. You can now chat about this document using the session_id."
+                "message": f"PDF '{file.filename}' uploaded successfully! I can now answer questions about this document.",
+                "is_mid_conversation": True  # Flag to indicate this can be used mid-conversation
             }
 
         except Exception as e:
@@ -330,7 +329,7 @@ class ChatHistoryRequest(BaseModel):
 @app.post("/chat")
 async def chat(request: ChatHistoryRequest):
     """
-    Enhanced chat with PDF context support
+    Enhanced chat with PDF context support and session switching
     """
     log_memory("CHAT_START")
     
@@ -342,25 +341,39 @@ async def chat(request: ChatHistoryRequest):
         if request.session_id and request.session_id in pdf_context_store:
             pdf_context = pdf_context_store[request.session_id]
             logger.info(f"Found PDF context for session: {request.session_id} (file: {pdf_context['filename']})")
+        else:
+            if request.session_id:
+                logger.warning(f"Session ID provided but not found: {request.session_id}")
+                return {
+                    "result": f"Sorry, I couldn't find the PDF session '{request.session_id}'. Please upload the PDF again.",
+                    "has_pdf_context": False,
+                    "pdf_filename": None,
+                    "error": "session_not_found"
+                }
         
-        # Limit chat history length
-        MAX_HISTORY_LENGTH = 8  # Reduced to save memory when including PDF context
+        # Keep full chat history when switching contexts (no truncation for continuity)
+        MAX_HISTORY_LENGTH = 12  # Increased to maintain conversation flow
         if len(request.messages) > MAX_HISTORY_LENGTH:
-            request.messages = request.messages[-MAX_HISTORY_LENGTH:]
-            logger.info(f"Chat history truncated to last {MAX_HISTORY_LENGTH} messages")
+            # Keep first few and last few messages to maintain context
+            first_messages = request.messages[:3]
+            last_messages = request.messages[-(MAX_HISTORY_LENGTH-3):]
+            request.messages = first_messages + last_messages
+            logger.info(f"Chat history optimized: kept first 3 and last {MAX_HISTORY_LENGTH-3} messages")
         
         # Build prompt based on whether we have PDF context
         if pdf_context:
-            # Chat with PDF context
+            # Chat with PDF context - maintain conversation flow
             base_prompt = CHAT_WITH_PDF_PROMPT.format(pdf_content=pdf_context["content"])
             pieces = [base_prompt]
             
-            # Add a reference to the document
-            pieces.append(f"User is asking about the document: '{pdf_context['filename']}'")
+            # Add context about the document
+            pieces.append(f"Document: '{pdf_context['filename']}' (uploaded during this conversation)")
             pieces.append("---")
+            pieces.append("Previous conversation continues below:")
         else:
             # General chat without PDF context
             pieces = [GENERAL_CHAT_PROMPT]
+            pieces.append("Continuing our conversation:")
         
         # Add conversation history
         for msg in request.messages:
@@ -370,14 +383,14 @@ async def chat(request: ChatHistoryRequest):
 
         prompt = "\n\n".join(pieces)
         
-        # Limit prompt size (larger if we have PDF context)
-        MAX_PROMPT_SIZE = 15000 if pdf_context else 8000
+        # More generous prompt size limits for conversation continuity
+        MAX_PROMPT_SIZE = 18000 if pdf_context else 10000
         if len(prompt) > MAX_PROMPT_SIZE:
-            # If too large, prioritize recent conversation over PDF content
+            # If too large, prioritize recent conversation
             if pdf_context:
                 # Keep recent messages and truncate PDF content
-                recent_conversation = "\n\n".join(pieces[-6:])  # Last few exchanges
-                truncated_pdf = pdf_context["content"][:5000] + "...(truncated)"
+                recent_conversation = "\n\n".join(pieces[-8:])  # Last 8 exchanges
+                truncated_pdf = pdf_context["content"][:6000] + "...(truncated)"
                 prompt = CHAT_WITH_PDF_PROMPT.format(pdf_content=truncated_pdf) + "\n\n" + recent_conversation
             else:
                 prompt = prompt[-MAX_PROMPT_SIZE:]
@@ -408,7 +421,9 @@ async def chat(request: ChatHistoryRequest):
         return {
             "result": result,
             "has_pdf_context": pdf_context is not None,
-            "pdf_filename": pdf_context["filename"] if pdf_context else None
+            "pdf_filename": pdf_context["filename"] if pdf_context else None,
+            "session_id": request.session_id,
+            "context_maintained": True  # Indicates conversation context was preserved
         }
 
     except Exception as e:
@@ -419,6 +434,25 @@ async def chat(request: ChatHistoryRequest):
     finally:
         log_memory("CHAT_CLEANUP")
         gc.collect()
+
+# Add endpoint to switch PDF context mid-conversation
+@app.post("/switch-context")
+async def switch_context(request: dict):
+    """
+    Switch PDF context mid-conversation
+    """
+    session_id = request.get("session_id")
+    
+    if not session_id or session_id not in pdf_context_store:
+        raise HTTPException(404, "Session not found")
+    
+    context = pdf_context_store[session_id]
+    return {
+        "message": f"Switched context to '{context['filename']}'",
+        "session_id": session_id,
+        "filename": context["filename"],
+        "summary_preview": context["summary"][:200] + "..." if len(context["summary"]) > 200 else context["summary"]
+    }
 
 # Endpoint to get available PDF sessions
 @app.get("/sessions")

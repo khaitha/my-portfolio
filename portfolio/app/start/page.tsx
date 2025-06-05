@@ -19,9 +19,10 @@ export default function UploadPage() {
   const [chatLoading, setChatLoading] = useState(false);
   const [chatError, setChatError] = useState<string>("");
 
-  // Session state - THIS WAS MISSING
+  // Session state - Enhanced for mid-conversation uploads
   const [sessionId, setSessionId] = useState<string>("");
   const [pdfFilename, setPdfFilename] = useState<string>("");
+  const [availableSessions, setAvailableSessions] = useState<string[]>([]);
 
   const handlePdfSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -39,13 +40,25 @@ export default function UploadPage() {
       if (data.error) {
         setPdfError(data.error);
       } else {
-        setPdfOutput(data.result);
-        setSessionId(data.session_id); // Store session_id
-        setPdfFilename(data.filename); // Store filename
-        console.log("Session ID:", data.session_id); // Debug log
+        // Add upload notification to chat if we have existing conversation
+        if (chatMessages.length > 0) {
+          const uploadNotification: ChatMessage = {
+            role: "assistant",
+            content: `📄 ${data.message}\n\n**Document Summary:**\n${data.result}`
+          };
+          setChatMessages(prev => [...prev, uploadNotification]);
+        } else {
+          // If no existing conversation, show in PDF output area
+          setPdfOutput(data.result);
+        }
         
-        // Clear chat history when new PDF is uploaded
-        setChatMessages([]);
+        setSessionId(data.session_id);
+        setPdfFilename(data.filename);
+        setAvailableSessions(prev => [...prev, data.session_id]);
+        console.log("Session ID:", data.session_id);
+        
+        // Don't clear chat history - maintain conversation!
+        // setChatMessages([]); // REMOVED - this was clearing the conversation
       }
     } catch (err: any) {
       setPdfError(err.message);
@@ -72,7 +85,7 @@ export default function UploadPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
           messages: updatedHistory,
-          session_id: sessionId // Send session_id if available
+          session_id: sessionId // Send current session_id if available
         }),
       });
       const data = await res.json();
@@ -92,11 +105,30 @@ export default function UploadPage() {
     }
   };
 
+  // Function to start fresh conversation
+  const startFreshConversation = () => {
+    setChatMessages([]);
+    setSessionId("");
+    setPdfFilename("");
+    setPdfOutput("");
+  };
+
   return (
     <div className="min-h-screen bg-black p-8 flex flex-col items-center">
       {/* PDF Upload Card */}
       <div className="w-full max-w-2xl bg-white rounded-2xl shadow-lg p-8 mb-8">
-        <h1 className="text-2xl font-bold mb-4 text-black">Upload PDF</h1>
+        <div className="flex justify-between items-center mb-4">
+          <h1 className="text-2xl font-bold text-black">Upload PDF</h1>
+          {chatMessages.length > 0 && (
+            <button
+              onClick={startFreshConversation}
+              className="px-3 py-1 text-sm bg-gray-200 hover:bg-gray-300 rounded-lg text-gray-700"
+            >
+              Start Fresh
+            </button>
+          )}
+        </div>
+        
         <form onSubmit={handlePdfSubmit} className="flex flex-col gap-4">
           <label className="border-2 border-dashed rounded-xl p-6 text-center hover:border-blue-400 cursor-pointer bg-gray-100 text-black">
             <input
@@ -118,16 +150,18 @@ export default function UploadPage() {
             }`}
             style={{ alignSelf: "center", width: "auto" }}
           >
-            {pdfLoading ? "Processing…" : "Upload & Analyze"}
+            {pdfLoading ? "Processing…" : chatMessages.length > 0 ? "Add PDF to Conversation" : "Upload & Analyze"}
           </button>
         </form>
+        
         {pdfError && <p className="mt-2 text-red-600">{pdfError}</p>}
-        {pdfOutput && (
+        
+        {/* Only show PDF output if no conversation exists */}
+        {pdfOutput && chatMessages.length === 0 && (
           <div className="mt-4">
             <pre className="p-4 bg-gray-900 text-white rounded whitespace-pre-wrap">
               {pdfOutput}
             </pre>
-            {/* Show PDF context status */}
             {sessionId && (
               <div className="mt-2 p-2 bg-green-100 border border-green-300 rounded text-green-800 text-sm">
                 ✓ PDF "{pdfFilename}" is ready for chat. Ask questions about the document below!
@@ -142,17 +176,15 @@ export default function UploadPage() {
         <h2 className="text-2xl font-bold mb-4 text-black">
           Chat {sessionId && pdfFilename && (
             <span className="text-sm font-normal text-gray-600">
-              (discussing: {pdfFilename})
+              (current context: {pdfFilename})
             </span>
           )}
         </h2>
+        
         <div className="h-64 overflow-y-auto mb-4 space-y-2 text-black">
           {chatMessages.length === 0 ? (
             <div className="text-gray-500 text-center py-8">
-              {sessionId ? 
-                "Ask questions about your uploaded PDF..." : 
-                "Upload a PDF first, or start a general conversation..."
-              }
+              Start a conversation or upload a PDF to begin...
             </div>
           ) : (
             chatMessages.map((m, i) => (
@@ -169,13 +201,14 @@ export default function UploadPage() {
             ))
           )}
         </div>
+        
         <form onSubmit={handleChatSubmit} className="flex gap-2 text-black">
           <input
             type="text"
             value={chatInput}
             onChange={(e) => setChatInput(e.target.value)}
             disabled={chatLoading}
-            placeholder={sessionId ? "Ask about your PDF..." : "Ask a question..."}
+            placeholder={sessionId ? "Ask about your PDF or anything else..." : "Ask a question..."}
             className="flex-1 border rounded px-3 py-2 text-black"
           />
           <button
