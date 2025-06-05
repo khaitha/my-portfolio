@@ -60,7 +60,7 @@ pdf_context_store = {}  # Store PDF content by session/user
 
 # Enhanced system prompts - UPDATED for mid-conversation PDF uploads
 PDF_SUMMARY_PROMPT = (
-    "You are an expert document analyzer. Provide a CONCISE scrape of this document . "
+    "You are an expert document analyzer. Provide a DETAILED scrape of this document. "
     "Focus on:\n"
     "• Main topic and purpose\n"
     "• Key findings or conclusions\n"
@@ -74,14 +74,14 @@ CHAT_WITH_PDF_PROMPT = (
     "You are a helpful AI assistant with access to a PDF document that the user has uploaded during our conversation. "
     "Answer questions about the document content, provide clarifications, and help the user understand the material. "
     "Always reference specific parts of the document when relevant. "
-    "If the user asks something not covered in the document, let them know politely. "
+    "If the user asks something not covered in the document, If user asks about document beyond its content, use your knowledge. If not possible, politely inform them.\n"
     "Keep responses concise but informative.\n\n"
     "PDF CONTENT:\n{pdf_content}\n\n"
     "CONVERSATION:\n"
 )
 
 GENERAL_CHAT_PROMPT = (
-    "You are a helpful assistant. Respond to the user's messages with concise and relevant information. If user asks about document beyond its content, use your knowledge to help assist them. "
+    "You are a helpful assistant. Respond to the user's messages with concise and relevant information."
     "Be friendly and always helpful. Keep replies short and to the point. "
 )
 
