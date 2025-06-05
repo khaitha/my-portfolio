@@ -97,11 +97,12 @@ async def memory_check_middleware(request: Request, call_next):
     # Log memory at start of request
     log_memory(f"REQUEST_{request_count}_START")
     
+    # TEMPORARILY DISABLE THIS CHECK
     # Check if memory is too high before processing
-    mem = get_memory_usage()
-    if mem['percent'] > 85:  # If memory usage > 85%
-        logger.warning(f"High memory usage detected: {mem['percent']:.1f}% - Rejecting request")
-        raise HTTPException(503, "Server temporarily overloaded due to high memory usage")
+    # mem = get_memory_usage()
+    # if mem['percent'] > 85:  # If memory usage > 85%
+    #     logger.warning(f"High memory usage detected: {mem['percent']:.1f}% - Rejecting request")
+    #     raise HTTPException(503, "Server temporarily overloaded due to high memory usage")
     
     response = await call_next(request)
     
