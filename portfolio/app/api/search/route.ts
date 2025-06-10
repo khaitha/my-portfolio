@@ -10,11 +10,12 @@ export async function POST(request: NextRequest) {
 
     console.log('Forwarding search request:', { query, num_results })
 
-    // Use the same pattern as your AI service but on port 8001
-    const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api";
+    // Use the same pattern as your AI service - all on same port
+    const apiUrl = process.env.NODE_ENV === 'production' 
+      ? 'https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api/search'  // Same as your AI service
+      : 'http://localhost:3000/search'  // Your local FastAPI on port 3000
 
-
-    const response = await fetch(API_URL, {
+    const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -42,7 +43,7 @@ export async function POST(request: NextRequest) {
     
     if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
       return NextResponse.json(
-        { error: 'Search service unavailable. Please ensure the search service is running.' },
+        { error: 'Search service unavailable. Please ensure the search service is running on port 3000.' },
         { status: 503 }
       )
     }

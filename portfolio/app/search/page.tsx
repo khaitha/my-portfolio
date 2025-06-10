@@ -14,7 +14,6 @@ interface SearchResponse {
   query: string
   ai_response: string
   sources: SearchResult[]
-  search_time?: number
 }
 
 export default function SearchPage() {
@@ -75,7 +74,7 @@ export default function SearchPage() {
               type="text"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
-              placeholder="Find anything..."
+              placeholder="Ask anything..."
               className="w-full px-6 py-4 text-lg bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
               disabled={loading}
             />
@@ -108,11 +107,6 @@ export default function SearchPage() {
               <div className="flex items-center gap-2 mb-4">
                 <Sparkles className="w-5 h-5 text-purple-400" />
                 <h2 className="text-xl font-semibold text-white">AI Answer</h2>
-                {results.search_time && (
-                  <span className="text-xs text-gray-400">
-                    ({results.search_time.toFixed(1)}s)
-                  </span>
-                )}
               </div>
               <div className="prose prose-invert max-w-none">
                 <p className="text-gray-200 leading-relaxed whitespace-pre-wrap">
