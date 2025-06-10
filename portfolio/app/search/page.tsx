@@ -14,6 +14,7 @@ interface SearchResponse {
   query: string
   ai_response: string
   sources: SearchResult[]
+  search_time?: number
 }
 
 export default function SearchPage() {
@@ -107,6 +108,11 @@ export default function SearchPage() {
               <div className="flex items-center gap-2 mb-4">
                 <Sparkles className="w-5 h-5 text-purple-400" />
                 <h2 className="text-xl font-semibold text-white">AI Answer</h2>
+                {results.search_time && (
+                  <span className="text-xs text-gray-400">
+                    ({results.search_time.toFixed(1)}s)
+                  </span>
+                )}
               </div>
               <div className="prose prose-invert max-w-none">
                 <p className="text-gray-200 leading-relaxed whitespace-pre-wrap">

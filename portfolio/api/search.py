@@ -18,28 +18,29 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
-import google.generativeai as genai
-from dotenv import load_dotenv
+# Correct import for Google's GenAI client (same as ai.py):
+from google import genai
 
-# Load environment variables
+# Load environment variables from .env
+from dotenv import load_dotenv
 load_dotenv()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Load Google API key
-GOOGLE_AI_API_KEY = os.getenv("GOOGLE_AI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-if not GOOGLE_AI_API_KEY:
-    raise RuntimeError("Missing GOOGLE_AI_API_KEY environment variable.")
+# Suppress warnings
+warnings.filterwarnings("ignore", message="CropBox missing from /Page")
 
-# Configure Google AI
-genai.configure(api_key=GOOGLE_AI_API_KEY)
+# Load Google API key from the environment (same as ai.py)
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GOOGLE_API_KEY:
+    raise RuntimeError("Missing GOOGLE_API_KEY environment variable.")
 
-# Global variables
-request_count = 0
+# Instantiate the client correctly (same as ai.py):
+client = genai.Client(api_key=GOOGLE_API_KEY)
 
-# Memory monitoring helper functions (same as your ai.py)
+# Memory monitoring helper functions (same as ai.py)
 def get_memory_usage():
     """Get current memory usage in MB"""
     process = psutil.Process(os.getpid())
@@ -56,9 +57,12 @@ def log_memory(stage: str):
     mem = get_memory_usage()
     logger.info(f"MEMORY [{stage}]: RSS={mem['rss_mb']:.1f}MB, VMS={mem['vms_mb']:.1f}MB, %={mem['percent']:.1f}%, Available={mem['available_mb']:.1f}MB")
 
+# Global variables
+request_count = 0
+
 app = FastAPI()
 
-# Reduce concurrent processing to save memory
+# Reduce concurrent processing to save memory (same as ai.py)
 processing_semaphore = asyncio.Semaphore(2)
 
 app.add_middleware(
@@ -71,19 +75,23 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Memory check middleware (same as your ai.py)
+# Memory check middleware (same as ai.py)
 @app.middleware("http")
 async def memory_check_middleware(request: Request, call_next):
     global request_count
     request_count += 1
     
+    # Log memory at start of request
     log_memory(f"SEARCH_REQUEST_{request_count}_START")
+    
     response = await call_next(request)
+    
+    # Log memory after request
     log_memory(f"SEARCH_REQUEST_{request_count}_END")
     
     return response
 
-# Timeout middleware (same as your ai.py)
+# Timeout middleware (same as ai.py)
 @app.middleware("http")
 async def timeout_middleware(request: Request, call_next):
     try:
@@ -92,12 +100,12 @@ async def timeout_middleware(request: Request, call_next):
         log_memory("SEARCH_TIMEOUT_ERROR")
         raise HTTPException(status_code=504, detail="Search request timeout")
 
-# Health check endpoint
+# Health check endpoint (same as ai.py)
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "search", "timestamp": time.time()}
+    return {"status": "healthy", "timestamp": time.time()}
 
-# Memory monitoring endpoint
+# Memory monitoring endpoint (same as ai.py)
 @app.get("/memory")
 async def get_memory_stats():
     """Get detailed memory statistics"""
@@ -114,6 +122,16 @@ async def get_memory_stats():
         "service": "search"
     }
 
+# Force garbage collection endpoint (same as ai.py)
+@app.post("/gc")
+async def force_garbage_collection():
+    """Force garbage collection - use only for debugging"""
+    log_memory("BEFORE_FORCED_GC")
+    collected = gc.collect()
+    log_memory("AFTER_FORCED_GC")
+    return {"collected_objects": collected, "message": "Garbage collection completed"}
+
+# Pydantic models
 class SearchRequest(BaseModel):
     query: str
     num_results: Optional[int] = 5
@@ -130,11 +148,13 @@ class SearchResponse(BaseModel):
     sources: List[SearchResult]
     search_time: float
 
+def clean_response(raw: str) -> str:
+    """Clean up AI response (same as ai.py)"""
+    cleaned = raw.replace("**", "").strip()
+    return cleaned
+
 class AISearchEngine:
     def __init__(self):
-        # Configure Google AI model
-        self.model = genai.GenerativeModel('gemini-2.0-flash')
-        
         # Setup Chrome options for minimal footprint
         self.chrome_options = Options()
         self.chrome_options.add_argument('--headless')
@@ -259,12 +279,20 @@ Instructions:
 Answer:
 """
             
-            # Generate response
-            response = self.model.generate_content(prompt)
+            log_memory("BEFORE_SEARCH_AI_CALL")
+            
+            # Generate response using the same client as ai.py
+            response = client.models.generate_content(
+                model="gemini-2.0-flash",
+                contents=prompt,
+            )
+            
+            log_memory("AFTER_SEARCH_AI_CALL")
+            
             ai_response = response.text or "Unable to generate response from search results."
             
-            # Clean response
-            cleaned_response = ai_response.replace("**", "").strip()
+            # Clean response (same as ai.py)
+            cleaned_response = clean_response(ai_response)
             
             log_memory("AI_GENERATION_COMPLETE")
             
@@ -352,15 +380,6 @@ async def search(request: SearchRequest):
         finally:
             log_memory("SEARCH_ENDPOINT_CLEANUP")
             gc.collect()
-
-# Force garbage collection endpoint (same as your ai.py)
-@app.post("/gc")
-async def force_garbage_collection():
-    """Force garbage collection - use only for debugging"""
-    log_memory("BEFORE_FORCED_GC")
-    collected = gc.collect()
-    log_memory("AFTER_FORCED_GC")
-    return {"collected_objects": collected, "message": "Garbage collection completed", "service": "search"}
 
 if __name__ == "__main__":
     import uvicorn

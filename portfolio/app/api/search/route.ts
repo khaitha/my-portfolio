@@ -10,8 +10,11 @@ export async function POST(request: NextRequest) {
 
     console.log('Forwarding search request:', { query, num_results })
 
-    // Forward to FastAPI search service
-    const response = await fetch('http://localhost:8001/search', {
+    // Use the same pattern as your AI service but on port 8001
+    const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api";
+
+
+    const response = await fetch(API_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -22,11 +25,11 @@ export async function POST(request: NextRequest) {
       }),
     })
 
-    console.log('FastAPI response status:', response.status)
+    console.log('Search API response status:', response.status)
 
     if (!response.ok) {
       const errorText = await response.text()
-      console.error('FastAPI error response:', errorText)
+      console.error('Search API error response:', errorText)
       throw new Error(`Search service failed: ${response.status}`)
     }
 
@@ -39,7 +42,7 @@ export async function POST(request: NextRequest) {
     
     if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
       return NextResponse.json(
-        { error: 'Search service unavailable. Make sure the FastAPI service is running on port 8001.' },
+        { error: 'Search service unavailable. Please ensure the search service is running.' },
         { status: 503 }
       )
     }
