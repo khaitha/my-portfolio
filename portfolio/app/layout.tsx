@@ -1,7 +1,7 @@
 import Header from '@/components/Headers';
 import "./globals.css";
 import Starfield from '@/components/StarryBackground';
-export const metadata = { title: "kh.AI" };
+export const metadata = { title: "My Portfolio" };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
