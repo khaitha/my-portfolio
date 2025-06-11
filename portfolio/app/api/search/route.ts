@@ -10,10 +10,12 @@ export async function POST(request: NextRequest) {
 
     console.log('Forwarding search request:', { query, num_results })
 
-    // Updated URLs based on your DigitalOcean route configuration
+    // Use the main API route with /search endpoint
     const apiUrl = process.env.NODE_ENV === 'production' 
-        ? 'https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api/search'
-        : 'http://localhost:8000/search'
+      ? 'https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api/search'
+      : 'http://localhost:8000/search'
+
+    console.log('Calling API URL:', apiUrl)
 
     const response = await fetch(apiUrl, {
       method: 'POST',
@@ -31,11 +33,11 @@ export async function POST(request: NextRequest) {
     if (!response.ok) {
       const errorText = await response.text()
       console.error('Search API error response:', errorText)
-      throw new Error(`Search service failed: ${response.status}`)
+      throw new Error(`Search service failed: ${response.status} - ${errorText}`)
     }
 
     const data = await response.json()
-    console.log('Search successful, returning data')
+    console.log('Search successful, returning data:', data)
     return NextResponse.json(data)
 
   } catch (error) {
@@ -43,13 +45,13 @@ export async function POST(request: NextRequest) {
     
     if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
       return NextResponse.json(
-        { error: 'Search service unavailable. Please ensure the search service is running on port 8000.' },
+        { error: 'Search service unavailable. Please ensure the search service is running.' },
         { status: 503 }
       )
     }
     
     return NextResponse.json(
-      { error: 'Search failed' },
+      { error: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}` },
       { status: 500 }
     )
   }
