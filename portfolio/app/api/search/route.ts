@@ -10,10 +10,10 @@ export async function POST(request: NextRequest) {
 
     console.log('Forwarding search request:', { query, num_results })
 
-    // Fix the URL - your search service runs on port 8000, not 3000
+    // Updated URLs based on your DigitalOcean route configuration
     const apiUrl = process.env.NODE_ENV === 'production' 
-      ? "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api"
-      : 'http://localhost:8000/search'  // Changed from port 3000 to 8000
+        ? 'https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api/search'
+        : 'http://localhost:8000/search'
 
     const response = await fetch(apiUrl, {
       method: 'POST',
