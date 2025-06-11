@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api";
-
+const API_URL = window.location.hostname === 'localhost' 
+  ? "http://localhost:8000" 
+  : "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api";
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
 export default function UploadPage() {
