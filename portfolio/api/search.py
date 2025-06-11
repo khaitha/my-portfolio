@@ -63,11 +63,9 @@ processing_semaphore = asyncio.Semaphore(2)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://goldfish-app-84zag.ondigitalocean.app",
-        "http://localhost:3000",
-    ],
-    allow_methods=["GET", "POST"],
+    allow_origins=["*"],
+    allow_credentials=False,   # disable credentials so wildcard is permitted
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 
