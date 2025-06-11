@@ -1,13 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
-const API_URL = window.location.hostname === 'localhost' 
-  ? "http://localhost:8000" 
-  : "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api";
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
 export default function UploadPage() {
+  const [apiUrl, setApiUrl] = useState<string>("");
+  
   // PDF upload states
   const [file, setFile] = useState<File | null>(null);
   const [pdfOutput, setPdfOutput] = useState<string>("");
@@ -25,9 +24,19 @@ export default function UploadPage() {
   const [pdfFilename, setPdfFilename] = useState<string>("");
   const [availableSessions, setAvailableSessions] = useState<string[]>([]);
 
+  // Set API URL after component mounts
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const url = window.location.hostname === 'localhost' 
+        ? "http://localhost:8000" 
+        : "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api";
+      setApiUrl(url);
+    }
+  }, []);
+
   const handlePdfSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file || pdfLoading) return;
+    if (!file || pdfLoading || !apiUrl) return;
     setPdfError(""); 
     setPdfOutput(""); 
     setPdfLoading(true);
@@ -35,7 +44,7 @@ export default function UploadPage() {
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(`${API_URL}/upload`, { method: "POST", body: form });
+      const res = await fetch(`${apiUrl}/upload`, { method: "POST", body: form });
       const data = await res.json();
       
       if (data.error) {
@@ -81,7 +90,7 @@ export default function UploadPage() {
     setChatError("");
 
     try {
-      const res = await fetch(`${API_URL}/chat`, {
+      const res = await fetch(`${apiUrl}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
