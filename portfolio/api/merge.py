@@ -15,16 +15,12 @@ from typing import Literal, List, Optional, Dict
 
 import pdfplumber
 
-# Selenium imports for search
-from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.keys import Keys
+# HTTP-based imports for search
+import requests
+import urllib.parse
+from bs4 import BeautifulSoup
 
 # Correct import for Google's GenAI client:
-from google import genai
 import google.generativeai as genai_config
 
 # Load environment variables from .env
@@ -45,7 +41,9 @@ if not GOOGLE_API_KEY:
 
 # Configure Google AI for both services
 genai_config.configure(api_key=GOOGLE_API_KEY)
-client = genai.Client(api_key=GOOGLE_API_KEY)
+
+# Create a shared model instance for chat and upload functionality
+chat_model = genai_config.GenerativeModel('gemini-2.0-flash')
 
 # Memory monitoring helper functions
 def get_memory_usage():
@@ -253,151 +251,194 @@ class AISearchEngine:
         # Configure Google AI model
         self.model = genai_config.GenerativeModel('gemini-2.0-flash')
         
-        # Setup Chrome options for minimal footprint
-        self.chrome_options = Options()
-        self.chrome_options.add_argument('--headless')
-        self.chrome_options.add_argument('--no-sandbox')
-        self.chrome_options.add_argument('--disable-dev-shm-usage')
-        self.chrome_options.add_argument('--disable-gpu')
-        self.chrome_options.add_argument('--disable-images')
-        self.chrome_options.add_argument('--disable-javascript')
-        self.chrome_options.add_argument('--disable-web-security')
-        self.chrome_options.add_argument('--disable-features=VizDisplayCompositor')
-        self.chrome_options.add_argument('--disable-extensions')
-        self.chrome_options.add_argument('--disable-plugins')
-        self.chrome_options.add_argument('--log-level=3')
-        self.chrome_options.add_argument('--silent')
-        self.chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-        self.chrome_options.add_experimental_option('useAutomationExtension', False)
-        self.chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        # HTTP headers for web requests (no Selenium)
+        self.headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1'
+        }
     
     def search_duckduckgo(self, query: str, num_results: int = 5) -> List[Dict]:
-        """Quick search without heavy scraping"""
+        """Improved HTTP-based search with better URL extraction"""
         search_results = []
-        driver = None
         
         try:
-            log_memory("SELENIUM_START")
-            driver = webdriver.Chrome(options=self.chrome_options)
-            wait = WebDriverWait(driver, 15)
+            log_memory("HTTP_SEARCH_START")
             
-            logger.info(f"Navigating to DuckDuckGo for query: {query}")
-            driver.get("https://duckduckgo.com")
+            # Try multiple search approaches
+            search_results = self._search_duckduckgo_instant(query, num_results)
             
-            # Search
-            search_box = wait.until(EC.presence_of_element_located((By.NAME, "q")))
-            search_box.clear()
-            search_box.send_keys(query)
-            search_box.send_keys(Keys.RETURN)
-            
-            time.sleep(3)  # Wait for results
-            log_memory("AFTER_SEARCH")
-            
-            # Extract results quickly
-            results = driver.find_elements(By.CSS_SELECTOR, "[data-testid='result']")
-            logger.info(f"Found {len(results)} search result elements")
-            
-            for i, result in enumerate(results[:num_results]):
-                try:
-                    title_element = result.find_element(By.CSS_SELECTOR, "h2 a")
-                    title = title_element.text.strip()
-                    url = title_element.get_attribute("href")
-                    
-                    # Get snippet without deep scraping
-                    snippet = ""
-                    try:
-                        snippet_element = result.find_element(By.CSS_SELECTOR, "[data-result='snippet']")
-                        snippet = snippet_element.text.strip()[:300]  # Limit snippet
-                    except:
-                        # Try alternative snippet selectors
-                        try:
-                            snippet_element = result.find_element(By.CSS_SELECTOR, ".result__snippet")
-                            snippet = snippet_element.text.strip()[:300]
-                        except:
-                            pass
-                    
-                    if title and url:
-                        search_results.append({
-                            "title": title,
-                            "url": url,
-                            "snippet": snippet,
-                            "rank": i + 1
-                        })
-                        logger.info(f"Extracted result {i+1}: {title[:50]}...")
-                except Exception as e:
-                    logger.warning(f"Error extracting result {i}: {e}")
-                    continue
+            if not search_results:
+                # Fallback to HTML scraping
+                search_results = self._search_duckduckgo_html(query, num_results)
             
             log_memory("SEARCH_EXTRACTION_COMPLETE")
             
         except Exception as e:
-            logger.error(f"Search error: {e}")
-            log_memory("SEARCH_ERROR")
+            logger.error(f"HTTP search error: {e}")
+            log_memory("HTTP_SEARCH_ERROR")
+            
+            # Create working fallback results
+            search_results = self._create_fallback_results(query, num_results)
         finally:
-            if driver:
-                driver.quit()
-            log_memory("SELENIUM_CLEANUP")
+            log_memory("HTTP_SEARCH_CLEANUP")
             gc.collect()
         
         return search_results
-    
-    def generate_response(self, query: str, search_results: List[Dict]) -> str:
-        """Generate AI response using only search results"""
-        if not search_results:
-            return "No search results found for your query. Please try a different search term."
+
+    def _search_duckduckgo_instant(self, query: str, num_results: int) -> List[Dict]:
+        """Try DuckDuckGo Instant Answer API first"""
+        try:
+            # Use DuckDuckGo's instant answer API
+            encoded_query = urllib.parse.quote_plus(query)
+            api_url = f"https://api.duckduckgo.com/?q={encoded_query}&format=json&no_html=1&skip_disambig=1"
+            
+            response = requests.get(api_url, headers=self.headers, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            results = []
+            
+            # Extract results from various sections
+            if 'RelatedTopics' in data:
+                for i, topic in enumerate(data['RelatedTopics'][:num_results]):
+                    if isinstance(topic, dict) and 'FirstURL' in topic and 'Text' in topic:
+                        results.append({
+                            "title": topic.get('Text', '').split(' - ')[0][:100],
+                            "url": topic['FirstURL'],
+                            "snippet": topic.get('Text', '')[:300],
+                            "rank": i + 1
+                        })
+            
+            return results
+        except:
+            return []
+
+    def _search_duckduckgo_html(self, query: str, num_results: int) -> List[Dict]:
+        """Fallback HTML scraping method"""
+        search_results = []
         
         try:
-            log_memory("AI_GENERATION_START")
+            encoded_query = urllib.parse.quote_plus(query)
+            search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
             
-            # Create context from search results only
-            context = "Search Results:\n"
-            for i, result in enumerate(search_results):
-                context += f"[{i+1}] {result['title']}\n"
-                context += f"URL: {result['url']}\n"
-                if result['snippet']:
-                    context += f"Summary: {result['snippet']}\n"
-                context += "\n"
+            response = requests.get(search_url, headers=self.headers, timeout=15)
+            response.raise_for_status()
             
-            prompt = f"""
-You are an AI search assistant similar to Perplexity. Based on the search results below, provide a comprehensive and well-structured answer to the user's question.
-
-{context}
-
-User Question: {query}
-
-Instructions:
-- Provide a clear, informative answer that directly addresses the user's question
-- Use information from the search results provided above
-- Include relevant citations using [1], [2], [3], etc. referring to the numbered search results
-- Structure your response with proper paragraphs for readability
-- Be concise but thorough - aim for 2-4 paragraphs
-- If the search results don't fully answer the question, mention what information is available
-- Focus on the most relevant and credible information from the sources
-
-Answer:
-"""
+            soup = BeautifulSoup(response.content, 'html.parser')
             
-            # Generate response
+            # Look for result links more specifically
+            result_links = soup.find_all('a', {'class': 'result__a'})
+
+            for i, link in enumerate(result_links[:num_results]):
+                try:
+                    title = link.get_text().strip()
+                    href = link.get('href', '')
+                    
+                    # Extract real URL from DuckDuckGo redirect
+                    real_url = self._extract_real_url(href)
+                    
+                    if not real_url:
+                        continue
+                    
+                    # Find snippet in parent container
+                    snippet = ""
+                    parent = link.find_parent('div', class_='result')
+                    if parent:
+                        snippet_elem = parent.find('a', class_='result__snippet')
+                        if snippet_elem:
+                            snippet = snippet_elem.get_text().strip()[:300]
+                    
+                    if title and real_url:
+                        search_results.append({
+                            "title": title,
+                            "url": real_url,
+                            "snippet": snippet,
+                            "rank": i + 1
+                        })
+                except Exception as e:
+                    logger.warning(f"Error extracting result {i}: {e}")
+                    continue
+                
+        except Exception as e:
+            logger.error(f"HTML search error: {e}")
+        
+        return search_results
+
+    def _extract_real_url(self, duckduckgo_url: str) -> str:
+        """Extract the real URL from DuckDuckGo's redirect URL"""
+        if not duckduckgo_url:
+            return ""
+        
+        try:
+            # Handle DuckDuckGo redirect URLs
+            if duckduckgo_url.startswith('/l/?'):
+                # Parse redirect URL
+                parsed = urllib.parse.parse_qs(urllib.parse.urlparse(duckduckgo_url).query)
+                if 'uddg' in parsed:
+                    return urllib.parse.unquote(parsed['uddg'][0])
+                elif 'u' in parsed:  
+                    return urllib.parse.unquote(parsed['u'][0])
+            elif duckduckgo_url.startswith('//'):
+                return 'https:' + duckduckgo_url
+            elif duckduckgo_url.startswith('/'):
+                return 'https://duckduckgo.com' + duckduckgo_url
+            elif not duckduckgo_url.startswith(('http://', 'https://')):
+                return 'https://' + duckduckgo_url
+            else:
+                return duckduckgo_url
+        except:
+            return duckduckgo_url
+
+    def _create_fallback_results(self, query: str, num_results: int) -> List[Dict]:
+        """Create working fallback results when search fails"""
+        fallback_sources = [
+            {"title": f"Wikipedia search for: {query}", "url": f"https://en.wikipedia.org/wiki/Special:Search/{urllib.parse.quote_plus(query)}"},
+            {"title": f"Google search for: {query}", "url": f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"},
+            {"title": f"Bing search for: {query}", "url": f"https://www.bing.com/search?q={urllib.parse.quote_plus(query)}"},
+            {"title": f"DuckDuckGo search for: {query}", "url": f"https://duckduckgo.com/?q={urllib.parse.quote_plus(query)}"},
+            {"title": f"YouTube search for: {query}", "url": f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"}
+        ]
+        
+        results = []
+        for i, source in enumerate(fallback_sources[:num_results]):
+            results.append({
+                "title": source["title"],
+                "url": source["url"],
+                "snippet": f"Search for '{query}' on {source['title'].split(' search')[0]}",
+                "rank": i + 1
+            })
+        
+        return results
+
+    def generate_response(self, query: str, search_results: List[Dict]) -> str:
+        """Generate AI response based on search results"""
+        try:
+            # Create a prompt for the AI to generate a response
+            sources_text = "\n\n".join([
+                f"Source {result['rank']}: {result['title']}\n"
+                f"URL: {result['url']}\n"
+                f"Summary: {result['snippet']}"
+                for result in search_results
+            ])
+            
+            prompt = f"""Based on the following search results, provide a comprehensive and helpful answer to the user's query: "{query}"
+
+Search Results:
+{sources_text}
+
+Please provide a clear, informative response that synthesizes information from the sources above. If the search results don't fully answer the query, mention what additional information might be helpful. Keep the response concise but thorough."""
+
             response = self.model.generate_content(prompt)
-            ai_response = response.text or "Unable to generate response from search results."
-            
-            # Clean response
-            cleaned_response = ai_response.replace("**", "").strip()
-            
-            log_memory("AI_GENERATION_COMPLETE")
-            
-            # Clear variables
-            prompt = None
-            context = None
-            response = None
-            gc.collect()
-            
-            return cleaned_response
+            return clean_response(response.text or "I couldn't generate a response based on the search results.")
             
         except Exception as e:
-            logger.error(f"AI generation error: {e}")
-            log_memory("AI_GENERATION_ERROR")
-            return f"Error generating AI response: {str(e)}"
+            logger.error(f"AI response generation failed: {e}")
+            return f"Based on the search results for '{query}', I found {len(search_results)} relevant sources. Please check the provided links for detailed information."
 
 # Initialize search engine
 search_engine = AISearchEngine()
@@ -449,10 +490,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             
             log_memory("BEFORE_AI_CALL")
 
-            response = client.models.generate_content(
-                model="gemini-2.0-flash",
-                contents=prompt,
-            )
+            response = chat_model.generate_content(prompt)
             
             log_memory("AFTER_AI_CALL")
 
@@ -582,10 +620,7 @@ async def chat(request: ChatHistoryRequest):
         
         log_memory("BEFORE_CHAT_AI_CALL")
 
-        response = client.models.generate_content(
-            model="gemini-2.0-flash",
-            contents=prompt,
-        )
+        response = chat_model.generate_content(prompt)
         
         log_memory("AFTER_CHAT_AI_CALL")
         
