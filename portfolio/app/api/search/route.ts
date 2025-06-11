@@ -12,7 +12,7 @@ export async function POST(request: NextRequest) {
 
     // Fix the URL - your search service runs on port 8000, not 3000
     const apiUrl = process.env.NODE_ENV === 'production' 
-      ? 'https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api/search'
+      ? "https://goldfish-app-84zag.ondigitalocean.app/my-portfolio-portfolio-api'
       : 'http://localhost:8000/search'  // Changed from port 3000 to 8000
 
     const response = await fetch(apiUrl, {
