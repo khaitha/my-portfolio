@@ -175,7 +175,7 @@ class ChatResponse(BaseModel):
     session_id: Optional[str]
     context_maintained: bool
 
-# Search Models
+# Search Models - Define SearchResult FIRST
 class SearchRequest(BaseModel):
     query: str
     num_results: Optional[int] = 5
@@ -192,6 +192,18 @@ class SearchResponse(BaseModel):
     sources: List[SearchResult]
     search_time: float
 
+# Chat with Search Models - Define AFTER SearchResult
+class ChatWithSearchRequest(BaseModel):
+    messages: List[ChatMessage]  # Change from single message to message history
+    search_when_needed: Optional[bool] = True
+    num_search_results: Optional[int] = 5
+
+class ChatWithSearchResponse(BaseModel):
+    ai_response: str
+    search_performed: bool
+    search_query: Optional[str] = None
+    sources_used: List[SearchResult] = []
+    response_time: float
 # AI Chat Helper Functions
 def extract_text_from_pdf(data: bytes) -> str:
     """Extract text with enhanced memory management and monitoring."""
@@ -251,7 +263,7 @@ class AISearchEngine:
         # Configure Google AI model
         self.model = genai_config.GenerativeModel('gemini-2.0-flash')
         
-        # HTTP headers for web requests (no Selenium)
+        # HTTP headers for web requests RIP selenium I tried
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -439,6 +451,145 @@ Please provide a clear, informative response that synthesizes information from t
         except Exception as e:
             logger.error(f"AI response generation failed: {e}")
             return f"Based on the search results for '{query}', I found {len(search_results)} relevant sources. Please check the provided links for detailed information."
+
+    def should_search(self, messages: List[ChatMessage]) -> tuple[bool, str]:
+        """Determine if a search is needed based on conversation context"""
+        try:
+            # Get the latest user message
+            latest_message = ""
+            for msg in reversed(messages):
+                if msg.role == "user":
+                    latest_message = msg.content
+                    break
+            
+            if not latest_message:
+                return False, ""
+            
+            # Use AI to determine if search is needed
+            analysis_prompt = [
+                {"role": "system", "content": """Analyze the user's latest message in this conversation and determine if it requires current/recent information that might not be in your training data.
+
+                Consider searching if the message asks about:
+                - Current events, news, or recent developments
+                - Current statistics, prices, or data
+                - Recent changes in laws, policies, or regulations  
+                - Current status of people, companies, or organizations
+                - Weather, sports scores, or time-sensitive information
+                - Technology updates or recent releases
+                - Current political situations or leaders
+
+                Respond with EXACTLY:
+                SEARCH: [specific search query] - if search is needed
+                NO_SEARCH - if your existing knowledge is sufficient
+                Examples:
+                "Who is the current president?" → SEARCH: current president 2025
+                "What is 2+2?" → NO_SEARCH
+                "Latest news about AI?" → SEARCH: latest AI news 2025
+                "Explain photosynthesis" → NO_SEARCH"""}, 
+                {
+                "role": "user", "content": f"Latest user message: '{latest_message}'"
+                            }
+                        ]
+
+            # Convert to string format for current model
+            prompt_text = f"{analysis_prompt[0]['content']}\n\nUser message: '{latest_message}'"
+            response = self.model.generate_content(prompt_text)
+            response_text = response.text.strip()
+            
+            if response_text.startswith("SEARCH:"):
+                search_query = response_text.replace("SEARCH:", "").strip()
+                return True, search_query
+            else:
+                return False, ""
+                
+        except Exception as e:
+            logger.error(f"Search decision analysis failed: {e}")
+            # Fallback: simple keyword detection
+            current_keywords = ["current", "latest", "recent", "today", "now", "2024", "2025", "president", "news"]
+            if any(keyword in latest_message.lower() for keyword in current_keywords):
+                return True, latest_message
+            return False, ""
+
+    def generate_chat_response_with_search(self, messages: List[ChatMessage], search_results: List[Dict]) -> str:
+        """Generate conversational response using search results and conversation history"""
+        try:
+            # Get the latest user message
+            latest_message = ""
+            for msg in reversed(messages):
+                if msg.role == "user":
+                    latest_message = msg.content
+                    break
+            
+            sources_text = "\n\n".join([
+                f"Source {result['rank']}: {result['title']}\n"
+                f"URL: {result['url']}\n"
+                f"Content: {result['snippet']}"
+                for result in search_results
+            ])
+            
+            # Build conversation context
+            conversation_context = ""
+            if len(messages) > 1:
+                recent_messages = messages[-6:]  # Last 6 messages for context
+                for msg in recent_messages[:-1]:  # Exclude the latest message
+                    role_label = "User" if msg.role == "user" else "Assistant"
+                    conversation_context += f"{role_label}: {msg.content}\n"
+            
+            prompt_parts = [
+                {"role": "system", "content": f"""You are a helpful AI assistant having a conversation with a user. The user just asked: "{latest_message}"
+
+Since this question requires current information, I searched the web and found these recent sources:
+
+{sources_text}
+
+Previous conversation context:
+{conversation_context}
+
+Guidelines:
+- Continue the natural flow of conversation
+- Use the most current and reliable information from the search results
+- Reference the conversation history when relevant
+- If sources contradict each other, mention this
+- Be conversational and engaging
+- If search results don't fully answer the question, acknowledge this
+- Keep responses helpful and natural"""},
+                {"role": "user", "content": latest_message}
+            ]
+
+            # Convert to string format for current model
+            prompt_text = f"{prompt_parts[0]['content']}\n\nUser: {latest_message}"
+            response = self.model.generate_content(prompt_text)
+            return clean_response(response.text or "I couldn't generate a response based on the search results.")
+            
+        except Exception as e:
+            logger.error(f"Chat response generation with search failed: {e}")
+            return f"I found some information but had trouble processing it. Here are some relevant sources: " + ", ".join([result['url'] for result in search_results[:3]])
+
+    def generate_chat_response_without_search(self, messages: List[ChatMessage]) -> str:
+        """Generate response using existing knowledge and conversation history"""
+        try:
+            # Build conversation for the model
+            conversation_parts = []
+            conversation_parts.append({"role": "system", "content": "You are a helpful AI assistant. Continue this conversation naturally and helpfully using your existing knowledge."})
+            
+            # Add recent conversation history (last 10 messages)
+            recent_messages = messages[-10:] if len(messages) > 10 else messages
+            for msg in recent_messages:
+                conversation_parts.append({"role": msg.role, "content": msg.content})
+            
+            # Convert to string format for current model
+            prompt_text = "You are a helpful AI assistant. Continue this conversation naturally:\n\n"
+            for msg in recent_messages:
+                role_label = "User" if msg.role == "user" else "Assistant"
+                prompt_text += f"{role_label}: {msg.content}\n"
+            prompt_text += "Assistant:"
+
+            response = self.model.generate_content(prompt_text)
+            return clean_response(response.text or "I'm not sure how to respond to that.")
+            
+        except Exception as e:
+            logger.error(f"Chat response generation failed: {e}")
+            return "I'm having trouble processing your message right now. Could you try rephrasing it?"
 
 # Initialize search engine
 search_engine = AISearchEngine()
@@ -720,6 +871,101 @@ async def search(request: SearchRequest):
             raise HTTPException(500, f"Search processing failed: {str(e)}")
         finally:
             log_memory("SEARCH_ENDPOINT_CLEANUP")
+            gc.collect()
+
+# Add the new chat with search endpoint after the existing search endpoint
+@app.post("/chat-search", response_model=ChatWithSearchResponse)
+async def chat_with_search(request: ChatWithSearchRequest):
+    """Conversational chat with AI that searches when current information is needed"""
+    log_memory("CHAT_SEARCH_START")
+    
+    async with processing_semaphore:
+        start_time = time.time()
+        
+        try:
+            if not request.messages:
+                raise HTTPException(400, "Messages cannot be empty")
+            
+            # Get the latest user message
+            latest_message = ""
+            for msg in reversed(request.messages):
+                if msg.role == "user":
+                    latest_message = msg.content
+                    break
+            
+            if not latest_message.strip():
+                raise HTTPException(400, "Latest message cannot be empty")
+            
+            if len(latest_message) > 500:
+                raise HTTPException(400, "Message too long. Maximum 500 characters.")
+            
+            logger.info(f"Processing chat-search with {len(request.messages)} messages")
+            
+            search_performed = False
+            search_query = None
+            sources_used = []
+            ai_response = ""
+            
+            # Determine if search is needed
+            if request.search_when_needed:
+                should_search, extracted_query = search_engine.should_search(request.messages)
+                
+                if should_search and extracted_query:
+                    logger.info(f"Search determined necessary. Query: {extracted_query}")
+                    search_performed = True
+                    search_query = extracted_query
+                    
+                    # Perform search
+                    search_results = search_engine.search_duckduckgo(extracted_query, request.num_search_results)
+                    
+                    if search_results:
+                        logger.info(f"Found {len(search_results)} search results for chat")
+                        
+                        # Generate response with search results
+                        ai_response = search_engine.generate_chat_response_with_search(request.messages, search_results)
+                        
+                        # Convert to response format
+                        sources_used = [
+                            SearchResult(
+                                title=result["title"],
+                                url=result["url"],
+                                snippet=result["snippet"],
+                                rank=result["rank"]
+                            )
+                            for result in search_results
+                        ]
+                    else:
+                        # No search results found, use existing knowledge
+                        ai_response = search_engine.generate_chat_response_without_search(request.messages)
+                        ai_response += "\n\n(Note: I tried to find current information but couldn't retrieve search results.)"
+                else:
+                    logger.info("No search needed, using existing knowledge")
+                    ai_response = search_engine.generate_chat_response_without_search(request.messages)
+            else:
+                # Search disabled, use existing knowledge
+                ai_response = search_engine.generate_chat_response_without_search(request.messages)
+            
+            response_time = time.time() - start_time
+            logger.info(f"Chat-search completed in {response_time:.2f} seconds")
+            
+            log_memory("CHAT_SEARCH_SUCCESS")
+            
+            return ChatWithSearchResponse(
+                ai_response=ai_response,
+                search_performed=search_performed,
+                search_query=search_query,
+                sources_used=sources_used,
+                response_time=response_time
+            )
+            
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Chat-search processing failed: {str(e)}")
+            log_memory("CHAT_SEARCH_ERROR")
+            raise HTTPException(500, f"Chat-search processing failed: {str(e)}")
+        finally:
+            log_memory("CHAT_SEARCH_CLEANUP")
             gc.collect()
 
 # ADDITIONAL ENDPOINTS

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
@@ -23,6 +23,27 @@ export default function UploadPage() {
   const [sessionId, setSessionId] = useState<string>("");
   const [pdfFilename, setPdfFilename] = useState<string>("");
   const [availableSessions, setAvailableSessions] = useState<string[]>([]);
+
+  // Ref for auto-scroll - ONLY for chat container
+  const messagesEndRef = useRef<HTMLDivElement>(null)
+  const chatContainerRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to bottom - ONLY within chat container
+  const scrollToBottom = () => {
+    if (chatContainerRef.current) {
+      // Scroll the chat container to the bottom
+      chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight
+    }
+  }
+
+  useEffect(() => {
+    // Small delay to ensure DOM is updated
+    const timer = setTimeout(() => {
+      scrollToBottom()
+    }, 100)
+    
+    return () => clearTimeout(timer)
+  }, [chatMessages, chatLoading])
 
   // Set API URL after component mounts
   useEffect(() => {
@@ -191,24 +212,40 @@ export default function UploadPage() {
           )}
         </h2>
         
-        <div className="h-64 overflow-y-auto mb-4 space-y-2 text-black">
+        <div 
+          ref={chatContainerRef}
+          className="h-64 overflow-y-auto mb-4 space-y-2 text-black scroll-smooth"
+          style={{ scrollBehavior: 'smooth' }}
+        >
           {chatMessages.length === 0 ? (
             <div className="text-gray-500 text-center py-8">
               Start a conversation or upload a PDF to begin...
             </div>
           ) : (
-            chatMessages.map((m, i) => (
-              <div
-                key={i}
-                className={`p-3 rounded-lg max-w-[80%] ${
-                  m.role === "user" 
-                    ? "bg-blue-500 text-white ml-auto" 
-                    : "bg-gray-200 text-black mr-auto"
-                }`}
-              >
-                <div className="whitespace-pre-wrap">{m.content}</div>
-              </div>
-            ))
+            <>
+              {chatMessages.map((m, i) => (
+                <div
+                  key={i}
+                  className={`p-3 rounded-lg max-w-[80%] ${
+                    m.role === "user" 
+                      ? "bg-blue-500 text-white ml-auto" 
+                      : "bg-gray-200 text-black mr-auto"
+                  }`}
+                >
+                  <div className="whitespace-pre-wrap">{m.content}</div>
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="bg-gray-200 text-black mr-auto p-3 rounded-lg max-w-[80%]">
+                  <div className="flex items-center gap-2">
+                    <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600"></div>
+                    <span>Thinking...</span>
+                  </div>
+                </div>
+              )}
+              {/* Invisible div for auto-scroll target */}
+              <div ref={messagesEndRef} style={{ height: '1px' }} />
+            </>
           )}
         </div>
         

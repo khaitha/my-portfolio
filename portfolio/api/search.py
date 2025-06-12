@@ -259,20 +259,20 @@ class AISearchEngine:
             
             prompt = f"""You are an AI search assistant similar to Perplexity. Based on the search results below, provide a comprehensive and well-structured answer to the user's question.
 
-{context}
+            {context}
 
-User Question: {query}
+            User Question: {query}
 
-Instructions:
-- Provide a clear, informative answer that directly addresses the user's question
-- Use information from the search results provided above
-- Include relevant citations using [1], [2], [3], etc. referring to the numbered search results
-- Structure your response with proper paragraphs for readability
-- Be concise but thorough - aim for 2-4 paragraphs
-- If the search results don't fully answer the question, mention what information is available
-- Focus on the most relevant and credible information from the sources
+            Instructions:
+            - Provide a clear, informative answer that directly addresses the user's question
+            - Use information from the search results provided above
+            - Include relevant citations using [1], [2], [3], etc. referring to the numbered search results
+            - Structure your response with proper paragraphs for readability
+            - Be concise but thorough - aim for 2-4 paragraphs
+            - If the search results don't fully answer the question, mention what information is available
+            - Focus on the most relevant and credible information from the sources
 
-Answer:"""
+            Answer:"""
             
             # Generate response
             response = self.model.generate_content(prompt)
