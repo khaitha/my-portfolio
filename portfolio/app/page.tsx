@@ -5,9 +5,9 @@ export default function Home() {
     <main className="min-h-screen flex items-center justify-center">
       <div className="flex flex-col items-center">
         <div>
-          <h1 className="text-4xl font-bold">
-            kh.AI - Your World
-          </h1>
+            <h1 className="text-4xl font-bold">
+              kh.AI - Your AI Assistant
+            </h1>
         </div>
         <div className="mt-6 flex gap-4">
             <Link href="/start">
