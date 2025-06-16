@@ -7,11 +7,12 @@ import gc
 import logging
 import asyncio
 import psutil
+import uuid
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Literal, List, Optional, Dict
+from typing import Literal, List, Optional, Dict, Any, Tuple
 
 import pdfplumber
 
@@ -84,6 +85,7 @@ CHAT_WITH_PDF_PROMPT = (
     "Always reference specific parts of the document when relevant. "
     "If the user asks something not covered in the document, If user asks about document beyond its content, use your knowledge. If not possible, politely inform them.\n"
     "Keep responses concise but informative.\n\n"
+    "VERY VERY IMPORTANT : Also sometimes the PDF scrape tool might forget spaces in between words, so when you quote from it or answer from it make sure you make the space.\n\n"
     "PDF CONTENT:\n{pdf_content}\n\n"
     "CONVERSATION:\n"
 )
@@ -167,6 +169,10 @@ class UploadResponse(BaseModel):
     filename: str
     message: str
     is_mid_conversation: bool
+    total_pages: int = 0
+    total_chunks: int = 0
+    document_size: str = ""
+    processing_method: str = "truncation"  # or "chunking"
 
 class ChatResponse(BaseModel):
     result: str
@@ -204,6 +210,8 @@ class ChatWithSearchResponse(BaseModel):
     search_query: Optional[str] = None
     sources_used: List[SearchResult] = []
     response_time: float
+
+
 # AI Chat Helper Functions
 def extract_text_from_pdf(data: bytes) -> str:
     """Extract text with enhanced memory management and monitoring."""
@@ -257,13 +265,50 @@ def generate_session_id() -> str:
     """Generate a simple session ID"""
     return f"session_{int(time.time())}_{request_count}"
 
+def create_intelligent_chunks(pdf_text: str, chunk_size: int = 2000, overlap: int = 200) -> List[Dict]:
+    """Create overlapping chunks with metadata"""
+    chunks = []
+    start = 0
+    chunk_id = 1
+    
+    while start < len(pdf_text):
+        end = start + chunk_size
+        
+        # Try to break at sentence boundaries near the target size
+        if end < len(pdf_text):
+            # Look for sentence end within last 200 chars
+            sentence_end = pdf_text.rfind('.', end - 200, end)
+            if sentence_end > start:
+                end = sentence_end + 1
+        
+        chunk_text = pdf_text[start:end].strip()
+        
+        if chunk_text:
+            chunks.append({
+                "id": chunk_id,
+                "text": chunk_text,
+                "start_pos": start,
+                "end_pos": end,
+                "char_count": len(chunk_text),
+                "word_count": len(chunk_text.split())
+            })
+            chunk_id += 1
+        
+        # Move start position with overlap
+        start = end - overlap if end < len(pdf_text) else end
+        
+        if start >= len(pdf_text):
+            break
+    
+    return chunks
+
 # Search Engine Class
 class AISearchEngine:
     def __init__(self):
         # Configure Google AI model
         self.model = genai_config.GenerativeModel('gemini-2.0-flash')
         
-        # HTTP headers for web requests RIP selenium I tried
+        # HTTP headers for web requests, RIP selenium I tried
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -439,11 +484,9 @@ class AISearchEngine:
             ])
             
             prompt = f"""Based on the following search results, provide a comprehensive and helpful answer to the user's query: "{query}"
-
-Search Results:
-{sources_text}
-
-Please provide a clear, informative response that synthesizes information from the sources above. If the search results don't fully answer the query, mention what additional information might be helpful. Keep the response concise but thorough."""
+            Search Results:
+            {sources_text}
+            Please provide a clear, informative response that synthesizes information from the sources above. If the search results don't fully answer the query, mention what additional information might be helpful. Keep the response concise but thorough."""
 
             response = self.model.generate_content(prompt)
             return clean_response(response.text or "I couldn't generate a response based on the search results.")
@@ -537,23 +580,19 @@ Please provide a clear, informative response that synthesizes information from t
             
             prompt_parts = [
                 {"role": "system", "content": f"""You are a helpful AI assistant having a conversation with a user. The user just asked: "{latest_message}"
-
-Since this question requires current information, I searched the web and found these recent sources:
-
-{sources_text}
-
-Previous conversation context:
-{conversation_context}
-
-Guidelines:
-- Continue the natural flow of conversation
-- Use the most current and reliable information from the search results
-- Reference the conversation history when relevant
-- If sources contradict each other, mention this
-- Be conversational and engaging
-- If search results don't fully answer the question, acknowledge this
-- Keep responses helpful and natural"""},
-                {"role": "user", "content": latest_message}
+                Since this question requires current information, I searched the web and found these recent sources:
+                {sources_text}
+                Previous conversation context:
+                {conversation_context}
+                Guidelines:
+                - Continue the natural flow of conversation
+                - Use the most current and reliable information from the search results
+                - Reference the conversation history when relevant
+                - If sources contradict each other, mention this
+                - Be conversational and engaging
+                - If search results don't fully answer the question, acknowledge this
+                - Keep responses helpful and natural"""},
+                                {"role": "user", "content": latest_message}
             ]
 
             # Convert to string format for current model
@@ -582,7 +621,7 @@ Guidelines:
             for msg in recent_messages:
                 role_label = "User" if msg.role == "user" else "Assistant"
                 prompt_text += f"{role_label}: {msg.content}\n"
-            prompt_text += "Assistant:"
+            prompt_text += "Assistant:";
 
             response = self.model.generate_content(prompt_text)
             return clean_response(response.text or "I'm not sure how to respond to that.")
@@ -593,7 +632,7 @@ Guidelines:
 
 # Initialize search engine
 search_engine = AISearchEngine()
-
+MAX_FILE_SIZE = 50 * 1024 * 1024;
 # AI CHAT ENDPOINTS
 @app.post("/upload", response_model=UploadResponse)
 async def upload_pdf(file: UploadFile = File(...)):
@@ -601,33 +640,50 @@ async def upload_pdf(file: UploadFile = File(...)):
     log_memory("UPLOAD_START")
     
     async with processing_semaphore:
-        # File size limit
-        MAX_FILE_SIZE = 3 * 1024 * 1024  # 3MB
+        # Initialize variables at the very beginning
+        filename = ""
+        session_id = ""
         
-        if file.content_type != "application/pdf":
-            raise HTTPException(400, "Only PDFs allowed")
-
-        logger.info(f"Processing file: {file.filename}")
-        log_memory("BEFORE_FILE_READ")
-        
-        data = await file.read()
-        log_memory("AFTER_FILE_READ")
-        
-        if len(data) > MAX_FILE_SIZE:
-            raise HTTPException(413, "File too large. Maximum size is 3MB.")
-        
-        # Extract text from PDF
-        pdf_text = extract_text_from_pdf(data)
-        log_memory("AFTER_TEXT_EXTRACTION")
-        
-        # Clear data immediately after extraction
-        data = None
-        gc.collect()
-
-        if not pdf_text.strip():
-            return {"error": "No text extracted from PDF."}
-
         try:
+            if file.content_type != "application/pdf":
+                raise HTTPException(400, "Only PDFs allowed")
+
+            filename = file.filename or "unknown.pdf"
+            logger.info(f"Processing file: {filename}")
+            log_memory("BEFORE_FILE_READ")
+            
+            data = await file.read()
+            log_memory("AFTER_FILE_READ")
+            
+            if len(data) > MAX_FILE_SIZE:
+                raise HTTPException(413, "File too large. Maximum size is 50MB.")
+            
+            # Extract text from PDF
+            pdf_text = extract_text_from_pdf(data)
+            log_memory("AFTER_TEXT_EXTRACTION")
+            
+            # Clear data immediately after extraction
+            data = None
+            gc.collect()
+
+            # Check if pdf_text is None or empty BEFORE using it
+            if not pdf_text or not pdf_text.strip():
+                return UploadResponse(
+                    result="",
+                    session_id=str(uuid.uuid4()),  # Generate a session ID
+                    filename=filename,
+                    message="No text extracted from PDF. The file may be image-based or corrupted.",
+                    is_mid_conversation=False,
+                    total_pages=0,
+                    total_chunks=0,
+                    document_size="0 KB",
+                    processing_method="failed"
+                )
+
+            # Now safely use pdf_text for chunking and other operations
+            chunks = create_intelligent_chunks(pdf_text)
+            document_size = f"{len(pdf_text.encode('utf-8')) / 1024:.1f} KB"
+            
             # Reduce text size for CONCISE summary
             MAX_TEXT_SIZE = 40000  # Reduced for shorter summaries
             if len(pdf_text) > MAX_TEXT_SIZE:
@@ -652,7 +708,7 @@ async def upload_pdf(file: UploadFile = File(...)):
             session_id = generate_session_id()
             
             # Store the full PDF text (not truncated) for chat context
-            MAX_STORAGE_SIZE = 30000  # Reduced to save memory
+            MAX_STORAGE_SIZE = 300000  # Reduced to save memory
             if len(pdf_text) > MAX_STORAGE_SIZE:
                 stored_text = pdf_text[:MAX_STORAGE_SIZE] + "\n\n... (Document continues)"
             else:
@@ -686,16 +742,31 @@ async def upload_pdf(file: UploadFile = File(...)):
             return UploadResponse(
                 result=cleaned_summary,
                 session_id=session_id,
-                filename=file.filename,
-                message=f"PDF '{file.filename}' uploaded successfully! I can now answer questions about this document.",
-                is_mid_conversation=True  # Flag to indicate this can be used mid-conversation
+                filename=filename,
+                message=f"PDF '{filename}' uploaded successfully! I can now answer questions about this document.",
+                is_mid_conversation=True,
+                total_pages=0,  # You'd need to implement page counting
+                total_chunks=len(chunks),
+                document_size=document_size,
+                processing_method="chunking"
             )
 
         except Exception as e:
             log_memory("UPLOAD_ERROR")
             logger.error(f"Processing failed: {str(e)}")
             traceback.print_exc()
-            raise HTTPException(500, "Processing failed")
+            
+            return UploadResponse(
+                result="",
+                session_id=session_id or str(uuid.uuid4()),
+                filename=filename,
+                message=f"Error processing PDF: {str(e)}",
+                is_mid_conversation=False,
+                total_pages=0,
+                total_chunks=0,
+                document_size="0 KB",
+                processing_method="error"
+            )
         finally:
             log_memory("UPLOAD_CLEANUP")
             gc.collect()
@@ -717,7 +788,7 @@ async def chat(request: ChatHistoryRequest):
             if request.session_id:
                 logger.warning(f"Session ID provided but not found: {request.session_id}")
                 return ChatResponse(
-                    result=f"Sorry, I couldn't find the PDF session '{request.session_id}'. Please upload the PDF again.",
+                    result=f"Sorry, I couldn't find the PDF. Please upload the PDF again.",
                     has_pdf_context=False,
                     pdf_filename=None,
                     session_id=request.session_id,
@@ -725,7 +796,7 @@ async def chat(request: ChatHistoryRequest):
                 )
         
         # Keep full chat history when switching contexts (no truncation for continuity)
-        MAX_HISTORY_LENGTH = 12  # Increased to maintain conversation flow
+        MAX_HISTORY_LENGTH = 12
         if len(request.messages) > MAX_HISTORY_LENGTH:
             # Keep first few and last few messages to maintain context
             first_messages = request.messages[:3]

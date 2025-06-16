@@ -4,6 +4,17 @@ import { useState, useEffect, useRef } from "react";
 
 type ChatMessage = { role: "user" | "assistant"; content: string };
 
+interface EnhancedUploadResponse {
+  result: string;
+  session_id: string;
+  filename: string;
+  message: string;
+  total_pages: number;
+  total_chunks: number;
+  document_size: string;
+  processing_method: string;
+}
+
 export default function UploadPage() {
   const [apiUrl, setApiUrl] = useState<string>("");
   
@@ -12,6 +23,10 @@ export default function UploadPage() {
   const [pdfOutput, setPdfOutput] = useState<string>("");
   const [pdfError, setPdfError] = useState<string>("");
   const [pdfLoading, setPdfLoading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<{
+    stage: string;
+    details: string;
+  } | null>(null);
 
   // Chat states
   const [chatInput, setChatInput] = useState("");
@@ -55,46 +70,96 @@ export default function UploadPage() {
     }
   }, []);
 
+  // Add file size constants
+  const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+  
+  // Update file change handler with validation
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0] ?? null;
+    setFile(selectedFile);
+    setPdfError(""); // Clear any previous errors
+    
+    if (selectedFile) {
+      const sizeMB = (selectedFile.size / (1024 * 1024)).toFixed(1);
+      console.log(`Selected file: ${selectedFile.name} (${sizeMB}MB)`);
+      
+      if (selectedFile.size > MAX_FILE_SIZE) {
+        setPdfError(`File too large (${sizeMB}MB). Maximum size is 50MB. Please compress your PDF or use a smaller file.`);
+      }
+    }
+  };
+
+  // Enhanced upload handler with better error messages
   const handlePdfSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!file || pdfLoading || !apiUrl) return;
+    
+    const fileSizeMB = (file.size / (1024 * 1024)).toFixed(2);
+    console.log(`Uploading file: ${file.name}, Size: ${fileSizeMB}MB`);
+    
     setPdfError(""); 
     setPdfOutput(""); 
     setPdfLoading(true);
+    setUploadProgress({ stage: "Uploading...", details: `Sending ${fileSizeMB}MB file to server` });
     
     try {
       const form = new FormData();
       form.append("file", file);
-      const res = await fetch(`${apiUrl}/upload`, { method: "POST", body: form });
-      const data = await res.json();
       
-      if (data.error) {
-        setPdfError(data.error);
-      } else {
-        // Add upload notification to chat if we have existing conversation
-        if (chatMessages.length > 0) {
-          const uploadNotification: ChatMessage = {
-            role: "assistant",
-            content: `📄 ${data.message}\n\n**Document Summary:**\n${data.result}`
-          };
-          setChatMessages(prev => [...prev, uploadNotification]);
-        } else {
-          // If no existing conversation, show in PDF output area
-          setPdfOutput(data.result);
-        }
-        
-        setSessionId(data.session_id);
-        setPdfFilename(data.filename);
-        setAvailableSessions(prev => [...prev, data.session_id]);
-        console.log("Session ID:", data.session_id);
-        
-        // Don't clear chat history - maintain conversation!
-        // setChatMessages([]); // REMOVED - this was clearing the conversation
+      const res = await fetch(`${apiUrl}/upload`, { 
+        method: "POST", 
+        body: form
+      });
+      
+      // Add this check for non-200 responses
+      if (!res.ok) {
+        const errorText = await res.text();
+        throw new Error(`Server error (${res.status}): ${errorText}`);
       }
+      
+      const data = await res.json();
+      console.log('Response data:', data);
+      
+      // Check if response contains an error
+      if (data.error) {
+        let errorMessage = data.error;
+        if (data.details) {
+          errorMessage += `\n\nDetails: ${data.details}`;
+        }
+        throw new Error(errorMessage);
+      }
+      
+      // Check if it's a successful response with session_id
+      if (!data.session_id) {
+        console.error('Received data:', data); // Debug log
+        throw new Error(`Invalid response from server. Expected session_id but got: ${JSON.stringify(data)}`);
+      }
+      
+      setUploadProgress({ stage: "Processing...", details: "Creating embeddings and summary" });
+      
+      // Success - show processing results
+      const processingInfo = `✅ Processed ${data.total_chunks} chunks from ${data.total_pages} pages using ${data.processing_method}`;
+      
+      if (chatMessages.length > 0) {
+        const uploadNotification: ChatMessage = {
+          role: "assistant",
+          content: `📄 ${data.message}\n\n${processingInfo}\n\n**Document Summary:**\n${data.result}`
+        };
+        setChatMessages(prev => [...prev, uploadNotification]);
+      } else {
+        setPdfOutput(`${processingInfo}\n\n${data.result}`);
+      }
+      
+      setSessionId(data.session_id);
+      setPdfFilename(data.filename);
+      setFile(null);
+      
     } catch (err: any) {
-      setPdfError(err.message);
+      console.error('Upload error:', err);
+      setPdfError(err.message || 'Upload failed. Please try again.');
     } finally {
       setPdfLoading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -146,58 +211,98 @@ export default function UploadPage() {
 
   return (
     <div className="min-h-screen bg-black p-8 flex flex-col items-center">
-      {/* PDF Upload Card */}
-      <div className="w-full max-w-2xl bg-white rounded-2xl shadow-lg p-8 mb-8">
-        <div className="flex justify-between items-center mb-4">
-          <h1 className="text-2xl font-bold text-black">Upload PDF</h1>
-          {chatMessages.length > 0 && (
-            <button
-              onClick={startFreshConversation}
-              className="px-3 py-1 text-sm bg-gray-200 hover:bg-gray-300 rounded-lg text-gray-700"
-            >
-              Start Fresh
-            </button>
-          )}
-        </div>
-        
-        <form onSubmit={handlePdfSubmit} className="flex flex-col gap-4">
-          <label className="border-2 border-dashed rounded-xl p-6 text-center hover:border-blue-400 cursor-pointer bg-gray-100 text-black">
+      {/* Layout: PDF Upload Card on the left, Chat on the right */}
+      <div className="w-full max-w-5xl flex flex-col md:flex-row gap-8 mb-8">
+        {/* PDF Upload Card */}
+        <div className="w-full md:w-1/3 max-w-md bg-white rounded-xl shadow-lg p-6 mb-6 md:mb-0">
+          <div className="flex justify-between items-center mb-2">
+            <h1 className="text-lg font-bold text-black">Upload PDF</h1>
+            {chatMessages.length > 0 && (
+              <button
+                onClick={startFreshConversation}
+                className="px-2 py-1 text-xs bg-gray-200 hover:bg-gray-300 rounded text-gray-700"
+              >
+                Start Fresh
+              </button>
+            )}
+          </div>
+
+        <form onSubmit={handlePdfSubmit} className="flex justify-between items-center mb-2">
+            <label className="border-2 border-dashed rounded-lg p-2 text-center hover:border-blue-400 cursor-pointer bg-gray-100 text-black text-xs w-40 mx-auto">
             <input
               type="file"
               accept="application/pdf"
               className="hidden"
               disabled={pdfLoading}
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              onChange={handleFileChange}
             />
-            {file ? file.name : "Click to select a PDF"}
+        {file ? (
+          <div>
+            <p className="font-medium truncate">{file.name}</p>
+            <p className="text-xs text-gray-600 mt-1">
+          {(file.size / (1024 * 1024)).toFixed(1)}MB
+            </p>
+          </div>
+        ) : (
+          <div>
+            <p>Click to select a PDF</p>
+            <p className="text-xs text-gray-600 mt-1">Max:10MB</p>
+          </div>
+        )}
           </label>
           <button
-            type="submit"
-            disabled={pdfLoading}
-            className={`inline-flex items-center justify-center gap-2 px-10 py-3 rounded-lg text-white font-semibold text-base shadow transition ${
-              pdfLoading
-                ? "bg-gray-400 cursor-not-allowed opacity-80"
-                : "bg-gradient-to-r from-gray-900 to-gray-900 hover:from-blue-700 hover:to-blue-900 cursor-pointer"
-            }`}
-            style={{ alignSelf: "center", width: "auto" }}
+        type="submit"
+        disabled={pdfLoading || !file || (file && file.size > MAX_FILE_SIZE)}
+        className={`inline-flex items-center justify-center gap-2 px-6 py-2 rounded-lg text-white font-semibold text-sm shadow transition ${
+          pdfLoading || (file && file.size > MAX_FILE_SIZE)
+            ? "bg-gray-400 cursor-not-allowed opacity-80"
+            : "bg-gradient-to-r from-gray-900 to-gray-900 hover:from-blue-700 hover:to-blue-900 cursor-pointer"
+        }`}
+        style={{ alignSelf: "center", width: "auto" }}
           >
-            {pdfLoading ? "Processing…" : chatMessages.length > 0 ? "Add PDF to Conversation" : "Upload & Analyze"}
+        {pdfLoading ? "Processing…" : chatMessages.length > 0 ? "Add PDF" : "Upload"}
           </button>
         </form>
         
-        {pdfError && <p className="mt-2 text-red-600">{pdfError}</p>}
+        {pdfError && (
+          <div className="mt-2 p-2 bg-red-100 border border-red-300 rounded">
+        <p className="text-red-700 text-xs">{pdfError}</p>
+        {pdfError.includes('too large') && (
+          <div className="mt-1 text-red-600 text-xs">
+            <p>💡 Reduce PDF size:</p>
+            <ul className="list-disc list-inside mt-1 space-y-0.5">
+          <li>Use online PDF compressors</li>
+          <li>Split large documents</li>
+          <li>Remove unnecessary images/pages</li>
+          <li>Save with lower quality</li>
+            </ul>
+          </div>
+        )}
+          </div>
+        )}
         
-        {/* Only show PDF output if no conversation exists */}
         {pdfOutput && chatMessages.length === 0 && (
-          <div className="mt-4">
-            <pre className="p-4 bg-gray-900 text-white rounded whitespace-pre-wrap">
-              {pdfOutput}
-            </pre>
-            {sessionId && (
-              <div className="mt-2 p-2 bg-green-100 border border-green-300 rounded text-green-800 text-sm">
-                ✓ PDF "{pdfFilename}" is ready for chat. Ask questions about the document below!
-              </div>
-            )}
+          <div className="mt-2">
+        {/* <pre className="p-2 bg-gray-900 text-white rounded text-xs whitespace-pre-wrap">
+          {pdfOutput}
+        </pre> */}
+        {sessionId && (
+          <div className="mt-1 p-1 bg-green-100 border border-green-300 rounded text-green-800 text-xs">
+            ✓ PDF "{pdfFilename}" is ready for chat.
+          </div>
+        )}
+          </div>
+        )}
+
+        {uploadProgress && (
+          <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded">
+        <div className="flex items-center gap-2">
+          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600"></div>
+          <div>
+            <p className="font-medium text-blue-800 text-xs">{uploadProgress.stage}</p>
+            <p className="text-xs text-blue-600">{uploadProgress.details}</p>
+          </div>
+        </div>
           </div>
         )}
       </div>
@@ -271,6 +376,7 @@ export default function UploadPage() {
           </button>
         </form>
         {chatError && <p className="mt-2 text-red-600">{chatError}</p>}
+      </div>
       </div>
     </div>
   );
