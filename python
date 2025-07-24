@@ -1,0 +1,37 @@
+import matplotlib.pyplot as plt
+import numpy as np
+
+def print_dog():
+    """Prints a simple dog shape using matplotlib."""
+    try:
+        # Define coordinates for the dog's shape
+        dog_x = [0, 1, 2, 3, 4, 5, 5, 4, 3, 2, 1, 0]
+        dog_y = [2, 3, 4, 4, 3, 2, 1, 0, 0, 1, 1, 2]
+
+        # Create the plot
+        plt.plot(dog_x, dog_y, marker='o', linestyle='-', color='brown')
+
+        # Add some features (ear, tail)
+        plt.plot([0.5, 0.5], [3, 4], linestyle='-', color='brown')  # Ear
+        plt.plot([4.5, 4.5], [3, 4], linestyle='-', color='brown')  # Ear
+        plt.plot([5, 6], [2, 1.5], linestyle='-', color='brown')   # Tail
+        
+        # Set axis limits and labels
+        plt.xlim(-1, 7)
+        plt.ylim(-1, 5)
+        plt.xlabel("X-axis")
+        plt.ylabel("Y-axis")
+        plt.title("Simple Dog")
+
+        # Remove axis ticks and numbers
+        plt.xticks([])
+        plt.yticks([])
+
+        # Show the plot
+        plt.show()
+
+    except Exception as e:
+        print(f"An error occurred: {e}")
+
+if __name__ == "__main__":
+    print_dog()

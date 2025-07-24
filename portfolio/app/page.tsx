@@ -17,9 +17,11 @@ export default function Home() {
             </Link>
             <Link href="/search">
             <button className="px-6 py-2 bg-gray-900 text-white rounded hover:bg-purple-900 transition cursor-pointer">
-              Web Search Chat
+              General Chat
             </button>
-          </Link>
+            </Link>
+            <Link href="/coder">
+            </Link>
         </div>
       </div>
     </main>

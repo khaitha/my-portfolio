@@ -1,7 +1,14 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Search, Loader2, ExternalLink, Sparkles, MessageCircle, Trash2 } from 'lucide-react'
+import { Search, Loader2, ExternalLink, MessageCircle, Trash2, Code, Play, Terminal, Edit3, X, Copy, Check, AlertCircle, RotateCcw } from 'lucide-react'
+
+declare global {
+  interface Window {
+    pyodide: any;
+    loadPyodide: () => Promise<any>;
+  }
+}
 
 interface SearchResult {
   title: string
@@ -13,6 +20,12 @@ interface SearchResult {
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  hasCode?: boolean
+  codeId?: string
+  metadata?: {
+    searchPerformed?: boolean
+    executionTime?: number
+  }
 }
 
 interface ChatWithSearchResponse {
@@ -21,6 +34,44 @@ interface ChatWithSearchResponse {
   search_query?: string
   sources_used: SearchResult[]
   response_time: number
+}
+
+interface ExecutionResult {
+  success: boolean
+  output?: string
+  error?: string
+  executionTime?: number
+}
+
+interface CodeSession {
+  id: string
+  code: string
+  result: ExecutionResult | null
+  timestamp: number
+  description: string
+  requiredPackages: string[]
+  versions: CodeVersion[]  // Track code versions
+}
+
+interface CodeVersion {
+  code: string
+  timestamp: number
+  description: string
+  requiredPackages: string[]
+}
+
+interface CodeActionAnalysis {
+  action: 'generate' | 'edit' | 'execute' | 'revert' | 'question' | 'none'
+  confidence: number
+  context?: {
+    isPlottingRelated?: boolean
+    hasCodeContext?: boolean
+    needsExecution?: boolean
+    versionRequest?: {
+      type: 'previous' | 'specific'
+      steps?: number
+    }
+  }
 }
 
 export default function SearchPage() {
@@ -35,27 +86,644 @@ export default function SearchPage() {
     responseTime: number
   } | null>(null)
 
-  // Ref for auto-scroll - ONLY for chat container
+  // Code execution states
+  const [apiUrl, setApiUrl] = useState<string>("")
+  const [pyodideReady, setPyodideReady] = useState(false)
+  const [pyodideLoading, setPyodideLoading] = useState(false)
+  const [executing, setExecuting] = useState(false)
+  const [codeSessionActive, setCodeSessionActive] = useState(false)
+  const [codeSessions, setCodeSessions] = useState<CodeSession[]>([])
+  const [activeCodeId, setActiveCodeId] = useState<string | null>(null)
+  const [editingCode, setEditingCode] = useState<string>('')
+  const [loadedPackages, setLoadedPackages] = useState<Set<string>>(new Set())
+  const [copiedCode, setCopiedCode] = useState<string | null>(null)
+  const [executionProgress, setExecutionProgress] = useState<number>(0)
+
+  // Refs for auto-scroll
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const chatContainerRef = useRef<HTMLDivElement>(null)
 
-  // Auto-scroll to bottom - ONLY within chat container
+  // Auto-scroll to bottom
   const scrollToBottom = () => {
     if (chatContainerRef.current) {
-      // Scroll the chat container to the bottom
       chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight
     }
   }
 
   useEffect(() => {
-    // Small delay to ensure DOM is updated
-    const timer = setTimeout(() => {
-      scrollToBottom()
-    }, 100)
-    
+    const timer = setTimeout(scrollToBottom, 100)
     return () => clearTimeout(timer)
   }, [messages, loading])
 
+  // Function to detect potential infinite loops
+  const detectPotentialInfiniteLoops = (code: string): string[] => {
+    const warnings: string[] = []
+    const lines = code.toLowerCase().split('\n')
+    
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim()
+      
+      // Check for while True without break
+      if (line.includes('while true') || line.includes('while 1')) {
+        const hasBreak = lines.slice(i, Math.min(i + 10, lines.length))
+          .some(l => l.includes('break') || l.includes('return'))
+        if (!hasBreak) {
+          warnings.push(`Line ${i + 1}: 'while True' without visible break condition`)
+        }
+      }
+      
+      // Check for while loops with conditions that may never change
+      if (line.startsWith('while ') && !line.includes('input') && !line.includes('random')) {
+        const hasBreak = lines.slice(i, Math.min(i + 10, lines.length))
+          .some(l => l.includes('break') || l.includes('return'))
+        if (!hasBreak) {
+          warnings.push(`Line ${i + 1}: while loop without visible break condition`)
+        }
+      }
+      
+      // Check for for loops with very large ranges
+      const forMatch = line.match(/for.*range\s*\(\s*(\d+)\s*\)/)
+      if (forMatch) {
+        const range = parseInt(forMatch[1])
+        if (range > 100000) {
+          warnings.push(`Line ${i + 1}: Large range(${range}) may cause browser freeze`)
+        }
+      }
+      
+      // Check for nested loops that could be problematic
+      if ((line.includes('for ') || line.includes('while ')) && i > 0) {
+        const prevLines = lines.slice(Math.max(0, i-5), i)
+        const hasNestedLoop = prevLines.some(l => l.includes('for ') || l.includes('while '))
+        if (hasNestedLoop) {
+          warnings.push(`Line ${i + 1}: Nested loops detected - may cause performance issues`)
+        }
+      }
+    }
+    
+    return warnings
+  }
+
+  // Function to copy code to clipboard
+  const copyCodeToClipboard = async (code: string) => {
+    try {
+      await navigator.clipboard.writeText(code)
+      setCopiedCode(code)
+      setTimeout(() => setCopiedCode(null), 2000)
+    } catch (error) {
+      console.error('Failed to copy code:', error)
+    }
+  }
+
+  // Function to generate or edit code using AI
+  const generateOrEditCode = async (message: string, existingCode?: string): Promise<{code: string, requiredPackages: string[]} | null> => {
+    if (!apiUrl) return null
+    
+    try {
+      // Format the description for the API with explicit no-plotting instruction
+      let description = message
+      if (existingCode) {
+        description = `${message}\n\nExisting code to modify:\n${existingCode}\n\nIMPORTANT: Do not use matplotlib, seaborn, plotly or any plotting libraries. Focus on data processing, calculations, and text output only.`
+      } else {
+        description = `${message}\n\nIMPORTANT: Do not use matplotlib, seaborn, plotly or any plotting libraries. Focus on data processing, calculations, and text output only. Use print() statements to show results.`
+      }
+      
+      const response = await fetch(`${apiUrl}/generate-code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          description: description,
+          language: 'python'
+        })
+      })
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}))
+        throw new Error(errorData.detail || `HTTP ${response.status}: Code generation failed`)
+      }
+      
+      const data = await response.json()
+      
+      // Analyze the generated code for required packages
+      const requiredPackages = analyzeCodePackages(data.code || '')
+      
+      return {
+        code: data.code || '',
+        requiredPackages
+      }
+    } catch (error) {
+      console.error('Code generation error:', error)
+      return null
+    }
+  }
+
+  // Function to create a new code session
+  const createCodeSession = (code: string, description: string, requiredPackages: string[]): string => {
+    const sessionId = Date.now().toString()
+    const newSession: CodeSession = {
+      id: sessionId,
+      code,
+      description,
+      requiredPackages,
+      result: null,
+      timestamp: Date.now(),
+      versions: []
+    }
+    
+    setCodeSessions(prev => [...prev, newSession])
+    setActiveCodeId(sessionId)
+    setEditingCode(code)
+    
+    return sessionId
+  }
+
+  // Function to clear all code sessions
+  const clearCodeSessions = () => {
+    setCodeSessions([])
+    setActiveCodeId(null)
+    setEditingCode('')
+    setCodeSessionActive(false)
+    setCopiedCode(null)
+    
+    // Reset Python environment
+    resetPyodideCompletely()
+  }
+
+  // Function to execute the edited code
+  const executeEditedCode = async () => {
+    if (!activeCodeId || !pyodideReady || executing) return
+    
+    const session = codeSessions.find(s => s.id === activeCodeId)
+    if (!session) return
+    
+    setExecuting(true)
+    setExecutionProgress(0)
+    
+    // Simple progress simulation
+    const progressInterval = setInterval(() => {
+      setExecutionProgress(prev => Math.min(prev + 25, 100))
+    }, 250)
+    
+    try {
+      const result = await executeCode(editingCode, session.requiredPackages)
+      
+      // Update session with result
+      setCodeSessions(prev => prev.map(s => 
+        s.id === activeCodeId ? { ...s, result, code: editingCode } : s
+      ))
+      
+    } catch (error) {
+      console.error('Execution error:', error)
+    } finally {
+      clearInterval(progressInterval)
+      setExecuting(false)
+      setExecutionProgress(0)
+    }
+  }
+
+  // Set API URL after component mounts
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const port = window.location.hostname === 'localhost' ? '8000' : '8000'
+      setApiUrl(`http://${window.location.hostname}:${port}`)
+    }
+  }, [])
+
+  // Truncate text to fit within character limit
+  const truncateText = (text: string, maxLength: number): string => {
+    if (text.length <= maxLength) return text
+    return text.substring(0, maxLength - 3) + '...'
+  }
+
+  // AI-powered code action analysis
+  const analyzeCodeAction = async (userMessage: string, hasActiveCode: boolean, codeContext?: string): Promise<CodeActionAnalysis> => {
+    if (!apiUrl) {
+      // Fallback to simple keyword matching if API not available
+      return analyzeCodeActionFallback(userMessage, hasActiveCode)
+    }
+    
+    try {
+      const response = await fetch(`${apiUrl}/analyze-code-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_message: userMessage,
+          has_active_code: hasActiveCode,
+          code_context: codeContext || null,
+          conversation_context: messages.slice(-3).map(msg => ({
+            role: msg.role,
+            content: msg.content.substring(0, 200)
+          }))
+        })
+      })
+      
+      if (!response.ok) {
+        throw new Error('Analysis service unavailable')
+      }
+      
+      const data = await response.json()
+      
+      return {
+        action: data.action || 'none',
+        confidence: data.confidence || 0.5,
+        context: data.context || {}
+      }
+      
+    } catch (error) {
+      console.error('Code action analysis failed:', error)
+      return analyzeCodeActionFallback(userMessage, hasActiveCode)
+    }
+  }
+
+  // Fallback analysis using enhanced keyword detection
+  const analyzeCodeActionFallback = (userMessage: string, hasActiveCode: boolean): CodeActionAnalysis => {
+    const lowerText = userMessage.toLowerCase()
+    
+    // Version/revert detection
+    const versionKeywords = [
+      'go back', 'previous version', 'revert', 'undo', 'roll back', 'restore',
+      'previous', 'before', 'earlier', 'original', 'old version', 'last version'
+    ]
+    
+    const executionKeywords = [
+      'execute', 'run', 'run code', 'execute code', 'run this', 'execute this',
+      'can you execute', 'can you run', 'code execute', 'run it', 'execute it'
+    ]
+    
+    const editKeywords = [
+      'edit', 'change', 'modify', 'update', 'alter', 'fix', 'replace',
+      'make it', 'turn it into', 'convert to', 'switch to'
+    ]
+    
+    const simpleCodeKeywords = [
+      'print', 'hello world', 'calculate', 'compute', 'solve', 'algorithm',
+      'function', 'write code', 'create code', 'generate code', 'program',
+      'fibonacci', 'factorial', 'prime', 'sum', 'loop', 'list', 'string'
+    ]
+    
+    const plottingKeywords = [
+      'bar chart', 'line chart', 'pie chart', 'histogram', 'scatter plot',
+      'plot', 'graph', 'chart', 'visualize', 'visualization', 'matplotlib',
+      'draw a', 'create a chart', 'show a graph', 'make a plot'
+    ]
+    
+    // Check for version requests
+    if (hasActiveCode && versionKeywords.some(kw => lowerText.includes(kw))) {
+      return {
+        action: 'revert',
+        confidence: 0.9,
+        context: {
+          versionRequest: {
+            type: 'previous',
+            steps: 1
+          }
+        }
+      }
+    }
+    
+    // Check for execution requests
+    if (hasActiveCode && executionKeywords.some(kw => lowerText.includes(kw))) {
+      return {
+        action: 'execute',
+        confidence: 0.85,
+        context: { needsExecution: true }
+      }
+    }
+    
+    // Check for edit requests
+    if (hasActiveCode && editKeywords.some(kw => lowerText.includes(kw))) {
+      return {
+        action: 'edit',
+        confidence: 0.8,
+        context: { hasCodeContext: true }
+      }
+    }
+    
+    // Check for plotting requests FIRST (before simple code) to ensure proper classification
+    if (plottingKeywords.some(kw => lowerText.includes(kw))) {
+      return {
+        action: 'generate',
+        confidence: 0.7,
+        context: { isPlottingRelated: true }
+      }
+    }
+    
+    // Check for simple code generation requests (like "print hello world")
+    if (simpleCodeKeywords.some(kw => lowerText.includes(kw))) {
+      return {
+        action: 'generate',
+        confidence: 0.85,
+        context: { isPlottingRelated: false }
+      }
+    }
+    
+    return {
+      action: 'question',
+      confidence: 0.6,
+      context: {}
+    }
+  }
+
+  // Smart context creation for code questions
+  const createSmartContext = (userMessage: string, codeId?: string): string => {
+    const MAX_MESSAGE_LENGTH = 450
+    let baseMessage = userMessage
+    
+    if (!codeId) return baseMessage
+    
+    const session = codeSessions.find(s => s.id === codeId)
+    if (!session) return baseMessage
+    
+    const availableSpace = MAX_MESSAGE_LENGTH - baseMessage.length - 50
+    if (availableSpace <= 0) return baseMessage
+    
+    let context = ''
+    
+    if (session.result && !session.result.success) {
+      const errorInfo = ` [Error: ${session.result.error?.substring(0, 100)}...]`
+      if (context.length + errorInfo.length < availableSpace) {
+        context += errorInfo
+      }
+    }
+    
+    const remainingSpace = availableSpace - context.length
+    if (remainingSpace > 50) {
+      const codeSnippet = ` [Code: ${session.code.substring(0, remainingSpace - 20)}...]`
+      context += codeSnippet
+    }
+    
+    return baseMessage + context
+  }
+
+  // Analyze code to determine required packages (excluding plotting libraries)
+  const analyzeCodePackages = (code: string): string[] => {
+    const packages = []
+    const lines = code.toLowerCase()
+    
+    if (lines.includes('import numpy') || lines.includes('from numpy')) packages.push('numpy')
+    if (lines.includes('import pandas') || lines.includes('from pandas')) packages.push('pandas')
+    if (lines.includes('import scipy') || lines.includes('from scipy')) packages.push('scipy')
+    if (lines.includes('import sklearn') || lines.includes('from sklearn')) packages.push('scikit-learn')
+    if (lines.includes('import requests') || lines.includes('from requests')) packages.push('requests')
+    
+    return [...new Set(packages)]
+  }
+
+  // Check if code contains plotting/visualization libraries
+  const containsPlottingCode = (code: string): boolean => {
+    const plottingKeywords = [
+      'import matplotlib', 'from matplotlib', 'import seaborn', 'from seaborn',
+      'import plotly', 'from plotly', 'plt.', '.plot(', '.show(', '.savefig(',
+      'seaborn.', 'sns.', 'plotly.'
+    ]
+    
+    const lowerCode = code.toLowerCase()
+    return plottingKeywords.some(keyword => lowerCode.includes(keyword))
+  }
+
+  // Add version to code session
+  const addVersionToSession = (sessionId: string, code: string, description: string, requiredPackages: string[]): void => {
+    setCodeSessions(prev => prev.map(session => 
+      session.id === sessionId 
+        ? { 
+            ...session, 
+            versions: [...session.versions, {
+              code: session.code,
+              timestamp: session.timestamp,
+              description: session.description,
+              requiredPackages: session.requiredPackages
+            }],
+            code,
+            description,
+            requiredPackages,
+            result: null,
+            timestamp: Date.now()
+          }
+        : session
+    ))
+    setEditingCode(code)
+  }
+
+  // Revert to previous version
+  const revertToPreviousVersion = (sessionId: string, steps: number = 1): boolean => {
+    const session = codeSessions.find(s => s.id === sessionId)
+    if (!session || session.versions.length === 0) return false
+    
+    const targetIndex = Math.max(0, session.versions.length - steps)
+    const targetVersion = session.versions[targetIndex]
+    
+    if (!targetVersion) return false
+    
+    // Remove the versions we're reverting from
+    const newVersions = session.versions.slice(0, targetIndex)
+    
+    setCodeSessions(prev => prev.map(s => 
+      s.id === sessionId 
+        ? { 
+            ...s,
+            code: targetVersion.code,
+            description: targetVersion.description,
+            requiredPackages: targetVersion.requiredPackages,
+            result: null,
+            timestamp: Date.now(),
+            versions: newVersions
+          }
+        : s
+    ))
+    
+    setEditingCode(targetVersion.code)
+    return true
+  }
+
+  // Initialize Pyodide
+  const initializePyodide = async () => {
+    if (pyodideLoading) return
+    
+    setPyodideLoading(true)
+    try {
+      if (!window.pyodide) {
+        const script = document.createElement('script')
+        script.src = 'https://cdn.jsdelivr.net/pyodide/v0.24.1/full/pyodide.js'
+        script.onload = async () => {
+          try {
+            window.pyodide = await window.loadPyodide()
+            await window.pyodide.loadPackage(['numpy'])
+            setLoadedPackages(new Set(['numpy']))
+            setPyodideReady(true)
+            console.log('Pyodide initialized successfully')
+          } catch (error) {
+            console.error('Failed to initialize Pyodide:', error)
+            setPyodideReady(false)
+          }
+        }
+        script.onerror = () => {
+          console.error('Failed to load Pyodide script')
+          setPyodideReady(false)
+          setPyodideLoading(false)
+        }
+        document.head.appendChild(script)
+      } else {
+        setPyodideReady(true)
+      }
+    } catch (error) {
+      console.error('Error loading Pyodide:', error)
+      setPyodideReady(false)
+    } finally {
+      setPyodideLoading(false)
+    }
+  }
+
+  // Load packages on demand (excluding plotting libraries)
+  const loadPackageIfNeeded = async (packages: string[]): Promise<void> => {
+    const packagesToLoad = packages.filter(pkg => !loadedPackages.has(pkg))
+    
+    if (packagesToLoad.length === 0) return
+    
+    try {
+      for (const pkg of packagesToLoad) {
+        await window.pyodide.loadPackage([pkg])
+        setLoadedPackages(prev => new Set([...prev, pkg]))
+      }
+      console.log('Loaded packages:', packagesToLoad)
+    } catch (error) {
+      console.error('Failed to load packages:', packagesToLoad, error)
+    }
+  }
+
+  // Enhanced code execution with safety checks
+  const executeCode = async (code: string, requiredPackages: string[] = []): Promise<ExecutionResult> => {
+    if (!pyodideReady) {
+      return {
+        success: false,
+        error: "Python environment not ready yet. Please wait a moment.",
+        executionTime: 0
+      }
+    }
+
+    if (containsPlottingCode(code)) {
+      return {
+        success: false,
+        error: "❌ Plotting libraries (matplotlib, seaborn, plotly) are not supported in code execution.\n\nYou can still generate plotting code for reference, but execution is limited to:\n• Data processing (numpy, pandas)\n• Calculations and algorithms\n• Text processing\n• Basic Python operations\n\nTip: Ask for 'code without plotting' or 'data processing code' instead.",
+        executionTime: 0
+      }
+    }
+
+    // Check for dangerous patterns before execution
+    const warnings = detectPotentialInfiniteLoops(code)
+    if (warnings.length > 0) {
+      return {
+        success: false,
+        error: `❌ Code execution blocked for safety:\n\n${warnings.join('\n')}\n\n🔒 This code contains patterns that could freeze your browser. Please modify the code to:\n• Add break conditions to loops\n• Reduce large ranges\n• Avoid nested infinite loops\n\nOnce fixed, you can run the code safely.`,
+        executionTime: 0
+      }
+    }
+    
+    const startTime = performance.now()
+    
+    try {
+      const allowedPackages = requiredPackages.filter(pkg => 
+        !['matplotlib', 'seaborn', 'plotly'].includes(pkg)
+      )
+      
+      await loadPackageIfNeeded(allowedPackages)
+      
+      // Set up clean execution environment
+      await window.pyodide.runPython(`
+import sys
+from io import StringIO
+
+# Backup stdout/stderr
+_old_stdout = sys.stdout
+_old_stderr = sys.stderr
+_stdout_buffer = StringIO()
+_stderr_buffer = StringIO()
+sys.stdout = _stdout_buffer
+sys.stderr = _stderr_buffer
+      `)
+      
+      // Execute the code directly (no timeout needed since we pre-check for dangerous patterns)
+      await window.pyodide.runPython(code)
+      
+      // Get output
+      const stdout = await window.pyodide.runPython('_stdout_buffer.getvalue()')
+      const stderr = await window.pyodide.runPython('_stderr_buffer.getvalue()')
+      
+      // Restore stdout/stderr
+      await window.pyodide.runPython(`
+sys.stdout = _old_stdout
+sys.stderr = _old_stderr
+      `)
+      
+      const executionTime = performance.now() - startTime
+      
+      let finalOutput = ''
+      if (stdout) finalOutput += stdout
+      if (stderr) finalOutput += (finalOutput ? '\n' : '') + stderr
+      
+      if (!finalOutput.trim()) {
+        finalOutput = 'Code executed successfully (no output)'
+      }
+      
+      return {
+        success: true,
+        output: finalOutput,
+        executionTime
+      }
+      
+    } catch (error: any) {
+      try {
+        await window.pyodide.runPython(`
+sys.stdout = _old_stdout
+sys.stderr = _old_stderr
+        `)
+      } catch {}
+      
+      return {
+        success: false,
+        error: error.message || String(error),
+        executionTime: performance.now() - startTime
+      }
+    }
+  }
+
+  // Function to instrument code with interrupt checks
+  const addInterruptChecks = (code: string): string => {
+    // This function is no longer used but kept for potential future use
+    return code
+  }
+
+  // Nuclear option: completely reset Pyodide
+  const resetPyodideCompletely = async () => {
+    try {
+      setExecuting(false)
+      setExecutionProgress(0)
+      setPyodideReady(false)
+      setPyodideLoading(false)
+      setLoadedPackages(new Set())
+      
+      // Clear the global pyodide object
+      if (window.pyodide) {
+        delete window.pyodide
+      }
+      
+      // Remove pyodide script tag if it exists
+      const existingScript = document.querySelector('script[src*="pyodide"]')
+      if (existingScript) {
+        existingScript.remove()
+      }
+      
+      // Force garbage collection
+      if (window.gc) {
+        window.gc()
+      }
+      
+      console.log('Pyodide completely reset - reinitialize to continue')
+      
+    } catch (error) {
+      console.error('Failed to reset Pyodide:', error)
+    }
+  }
+
+  // Handle submit
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     if (!input.trim()) return
@@ -70,6 +738,173 @@ export default function SearchPage() {
     setMessages(newMessages)
 
     try {
+      // Analyze user intent for code-related actions
+      const codeContext = activeCodeId ? codeSessions.find(s => s.id === activeCodeId)?.code : undefined
+      const analysis = await analyzeCodeAction(userMessage, !!activeCodeId, codeContext)
+      
+      console.log('Code action analysis:', analysis) // Debug log
+
+      // Handle different actions based on AI analysis
+      switch (analysis.action) {
+        case 'generate':
+          // Initialize Python if needed for code generation
+          if (!pyodideReady && !pyodideLoading) {
+            setCodeSessionActive(true)
+            await initializePyodide()
+          }
+          
+          const smartMessage = createSmartContext(userMessage, activeCodeId || undefined)
+          const codeResult = await generateOrEditCode(smartMessage)
+          
+          if (codeResult) {
+            const sessionId = createCodeSession(
+              codeResult.code, 
+              userMessage.length > 50 ? userMessage.substring(0, 50) + '...' : userMessage,
+              codeResult.requiredPackages
+            )
+            
+            setCodeSessionActive(true)
+            
+            // Add assistant response with code reference
+            const responseMessage = `I've generated Python code for you! Here's what I created:\n\n\`\`\`python\n${codeResult.code}\n\`\`\`\n\nThe code is now available in the editor where you can run it, edit it, or ask for modifications. ${containsPlottingCode(codeResult.code) ? '\n\n⚠️ Note: This code contains plotting functions which cannot be executed in the browser, but you can copy it for local use.' : ''}`
+            
+            setMessages([...newMessages, { 
+              role: 'assistant', 
+              content: responseMessage,
+              hasCode: true,
+              codeId: sessionId
+            }])
+            
+            setLoading(false)
+            return
+          } else {
+            // If code generation failed, fall back to regular chat with an explanation
+            const fallbackMessage = "I couldn't generate code right now due to a backend service issue. However, I can still help you with coding questions, explanations, and guidance! What would you like to know about programming?"
+            
+            setMessages([...newMessages, { 
+              role: 'assistant', 
+              content: fallbackMessage
+            }])
+            
+            setLoading(false)
+            return
+          }
+          break
+
+        case 'edit':
+          if (activeCodeId && codeContext) {
+            const editResult = await generateOrEditCode(userMessage, codeContext)
+            
+            if (editResult) {
+              // Add version to session before editing
+              addVersionToSession(
+                activeCodeId,
+                editResult.code,
+                userMessage.length > 50 ? userMessage.substring(0, 50) + '...' : userMessage,
+                editResult.requiredPackages
+              )
+              
+              const responseMessage = `I've updated your code based on your request:\n\n\`\`\`python\n${editResult.code}\n\`\`\`\n\nThe changes are now in the editor. You can run it or ask for further modifications!`
+              
+              setMessages([...newMessages, { 
+                role: 'assistant', 
+                content: responseMessage,
+                hasCode: true,
+                codeId: activeCodeId
+              }])
+              
+              setLoading(false)
+              return
+            } else {
+              // If edit failed, provide helpful message
+              const editFailedMessage = "I couldn't edit the code right now due to a backend service issue. You can manually edit the code in the editor above, or I can help explain how to make the changes you want!"
+              
+              setMessages([...newMessages, { 
+                role: 'assistant', 
+                content: editFailedMessage
+              }])
+              
+              setLoading(false)
+              return
+            }
+          }
+          break
+
+        case 'execute':
+          if (activeCodeId) {
+            if (!pyodideReady) {
+              setMessages([...newMessages, { 
+                role: 'assistant', 
+                content: "Python environment is still loading. Please wait a moment and try again."
+              }])
+              setLoading(false)
+              return
+            }
+            
+            const session = codeSessions.find(s => s.id === activeCodeId)
+            if (session) {
+              setExecuting(true)
+              const result = await executeCode(session.code, session.requiredPackages)
+              
+              // Update session with execution result
+              setCodeSessions(prev => prev.map(s => 
+                s.id === activeCodeId ? { ...s, result } : s
+              ))
+              
+              const responseMessage = result.success 
+                ? `✅ Code executed successfully!\n\nOutput:\n\`\`\`\n${result.output}\n\`\`\`\n\nExecution time: ${result.executionTime?.toFixed(2)}ms`
+                : `❌ Code execution failed:\n\n\`\`\`\n${result.error}\n\`\`\`\n\nYou can edit the code and try again.`
+            
+              setMessages([...newMessages, { 
+                role: 'assistant', 
+                content: responseMessage,
+                hasCode: true,
+                codeId: activeCodeId
+              }])
+              
+              setExecuting(false)
+              setLoading(false)
+              return
+            }
+          }
+          break
+
+        case 'revert':
+          if (activeCodeId && analysis.context?.versionRequest) {
+            const steps = analysis.context.versionRequest.steps || 1
+            const success = revertToPreviousVersion(activeCodeId, steps)
+            
+            if (success) {
+              const session = codeSessions.find(s => s.id === activeCodeId)
+              const responseMessage = `✅ Reverted to previous version!\n\n\`\`\`python\n${session?.code}\n\`\`\`\n\nThe previous code is now active in the editor.`
+              
+              setMessages([...newMessages, { 
+                role: 'assistant', 
+                content: responseMessage,
+                hasCode: true,
+                codeId: activeCodeId
+              }])
+              
+              setLoading(false)
+              return
+            } else {
+              setMessages([...newMessages, { 
+                role: 'assistant', 
+                content: "❌ No previous versions available to revert to."
+              }])
+              
+              setLoading(false)
+              return
+            }
+          }
+          break
+
+        default:
+          // For questions and non-code requests, use regular chat
+          break
+      }
+
+      // Fall back to regular chat for questions and non-code requests
       const response = await fetch('/api/chat-search', {
         method: 'POST',
         headers: {
@@ -117,137 +952,500 @@ export default function SearchPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
-      <div className="container mx-auto px-4 py-8 max-w-4xl">
+      <div className="container mx-auto px-4 py-8 max-w-7xl">
         {/* Header */}
         <div className="text-center mb-8">
           <div className="flex items-center justify-center gap-2 mb-4">
             <MessageCircle className="w-8 h-8 text-purple-400" />
-            <h1 className="text-4xl font-bold text-white">Search with kh.AI</h1>
+            <h1 className="text-4xl font-bold text-white">kh.AI Search & Code</h1>
           </div>
           <p className="text-gray-300 text-lg">
-            Ask and I will search.
+            Intelligent code assistant with contextual understanding and version control.
           </p>
+          
+          {/* Enhanced Python Status */}
+          {codeSessionActive && (
+            <div className="mt-4 flex justify-center">
+              {pyodideLoading && (
+                <div className="text-blue-400 flex items-center gap-2">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Loading Python environment...
+                </div>
+              )}
+              
+              {pyodideReady && (
+                <div className="text-green-400 flex items-center gap-2">
+                  <Terminal className="w-4 h-4" />
+                  Python ready
+                </div>
+              )}
+              
+              {!pyodideReady && !pyodideLoading && codeSessionActive && (
+                <div className="text-yellow-400 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4" />
+                  Python initializing...
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* Chat Container */}
-        <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6 mb-6">
-          {/* Chat History - THIS is the only scrollable area */}
-          <div 
-            ref={chatContainerRef}
-            className="h-96 overflow-y-auto mb-4 space-y-4 scroll-smooth"
-            style={{ scrollBehavior: 'smooth' }}
-          >
-            {messages.length === 0 ? (
-              <div className="text-gray-400 text-center py-16">
-                <MessageCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                <p>Start a conversation...</p>
-                <p className="text-sm mt-2">Try asking: "Who is the current president?" or "What's 2+2?"</p>
+        <div className={`grid gap-6 ${codeSessionActive ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
+          {/* Chat Section */}
+          <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+          <MessageCircle className="w-5 h-5 text-purple-400" />
+          <h2 className="text-xl font-semibold text-white">Intelligent Chat</h2>
               </div>
-            ) : (
-              <>
-                {messages.map((message, index) => (
-                  <div
-                    key={index}
-                    className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    <div
-                      className={`max-w-[80%] p-4 rounded-lg ${
-                        message.role === 'user'
-                          ? 'bg-purple-600 text-white'
-                          : 'bg-white/10 text-gray-200 border border-white/20'
-                      }`}
-                    >
-                      <p className="whitespace-pre-wrap">{message.content}</p>
-                    </div>
+              {codeSessionActive && (
+          <div className="text-xs text-gray-400">
+            AI Code Assistant Active →
+          </div>
+              )}
+            </div>
+            
+            {/* Chat History */}
+            <div 
+              ref={chatContainerRef}
+              className="h-[28rem] overflow-y-auto mb-4 space-y-4 scroll-smooth"
+              style={{ scrollBehavior: 'smooth' }}
+            >
+              {messages.length === 0 ? (
+                <div className="text-gray-400 text-center py-16">
+                  <MessageCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                  <p>Start a conversation with your AI assistant...</p>
+                  <div className="text-sm mt-4 space-y-1">
+                    <p>• Natural language: "Print hello world"</p>
+                    <p>• Code editing: "Change it to print Brian"</p>
+                    <p>• Version control: "Go back to the previous version"</p>
+                    <p>• Execution: "Run this code"</p>
+                    <p className="text-purple-400">🤖 Powered by intelligent context understanding</p>
                   </div>
-                ))}
-                {loading && (
-                  <div className="flex justify-start">
-                    <div className="bg-white/10 border border-white/20 rounded-lg p-4">
-                      <div className="flex items-center gap-2 text-gray-300">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span>Thinking and searching when needed...</span>
+                </div>
+              ) : (
+                <>
+                  {messages.map((message, index) => (
+                    <div
+                      key={index}
+                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      <div
+                        className={`max-w-[85%] p-4 rounded-lg ${
+                          message.role === 'user'
+                            ? 'bg-purple-600 text-white'
+                            : 'bg-white/10 text-gray-200 border border-white/20'
+                        }`}
+                      >
+                        <div className="whitespace-pre-wrap">
+                          {message.content.split('**').map((part, partIndex) => (
+                            partIndex % 2 === 1 ? (
+                              <strong key={partIndex} className="font-semibold">{part}</strong>
+                            ) : (
+                              <span key={partIndex}>{part}</span>
+                            )
+                          ))}
+                        </div>
+                        
+                        {message.hasCode && message.codeId && (
+                          <div className="mt-2 p-2 bg-white/10 rounded text-xs">
+                            <Code className="w-3 h-3 inline mr-1" />
+                            Code available in editor
+                          </div>
+                        )}
                       </div>
+                    </div>
+                  ))}
+                  {loading && (
+                    <div className="flex justify-start">
+                      <div className="bg-white/10 border border-white/20 rounded-lg p-4">
+                        <div className="flex items-center gap-2 text-gray-300">
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          <span>Thinking and searching when needed...</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                  <div ref={messagesEndRef} style={{ height: '1px' }} />
+                </>
+              )}
+            </div>
+
+            {/* Search Status */}
+            {lastSearchInfo && messages.length > 0 && (
+              <div className="mb-4 p-3 bg-white/5 border border-white/10 rounded-lg">
+                <div className="flex items-center justify-between text-sm">
+                  <div className="flex items-center gap-2 text-gray-400">
+                    {lastSearchInfo.performed ? (
+                      <>
+                        <Search className="w-4 h-4 text-green-400" />
+                        <span>Searched for current information</span>
+                        {lastSearchInfo.query && (
+                          <span className="text-purple-300">"{lastSearchInfo.query}"</span>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <MessageCircle className="w-4 h-4 text-blue-400" />
+                        <span>Used existing knowledge</span>
+                      </>
+                    )}
+                  </div>
+                  <span className="text-gray-500">
+                    {lastSearchInfo.responseTime.toFixed(2)}s
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Input Form */}
+            <form onSubmit={handleSubmit} className="flex gap-2">
+              <div className="flex-1">
+                <input
+                  type="text"
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  placeholder={activeCodeId ? "Keep the conversation going or ask for code edits..." : "Type your message..."}
+                  className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  disabled={loading}
+                  maxLength={450}
+                />
+                {input.length > 350 && (
+                  <div className={`text-xs mt-1 ${input.length > 430 ? 'text-red-400' : 'text-yellow-400'}`}>
+                    {input.length}/450 characters
+                  </div>
+                )}
+              </div>
+              <button
+                type="submit"
+                disabled={loading || !input.trim() || input.length > 450}
+                className="px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg transition-colors"
+              >
+                {loading ? (
+                  <Loader2 className="w-5 h-5 text-white animate-spin" />
+                ) : (
+                  <Search className="w-5 h-5 text-white" />
+                )}
+              </button>
+              {messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={clearChat}
+                  className="px-4 py-3 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                  title="Clear conversation"
+                >
+                  <Trash2 className="w-5 h-5 text-white" />
+                </button>
+              )}
+            </form>
+
+            {/* Error Message */}
+            {error && (
+              <div className="mt-4 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-200 text-sm flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{error}</span>
+              </div>
+            )}
+          </div>
+
+          {/* Code Panel */}
+          {codeSessionActive && (
+            <div className="space-y-6">
+              {/* Code Editor */}
+              <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <div className="flex items-center gap-2">
+                    <Code className="w-5 h-5 text-green-400" />
+                    <h2 className="text-xl font-semibold text-white">Smart Code Editor</h2>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {/* Version indicator */}
+                    {activeCodeId && (() => {
+                      const session = codeSessions.find(s => s.id === activeCodeId)
+                      return session && session.versions.length > 0 ? (
+                        <div className="text-xs text-gray-400 flex items-center gap-1">
+                          <RotateCcw className="w-3 h-3" />
+                          Version {session.versions.length + 1}
+                        </div>
+                      ) : null
+                    })()}
+                    <button
+                      onClick={clearCodeSessions}
+                      className="bg-red-600 text-white px-3 py-1 rounded text-sm hover:bg-red-700 flex items-center gap-1"
+                      title="Close code panel and clear Python session"
+                    >
+                      <X className="w-3 h-3" />
+                      Close
+                    </button>
+                  </div>
+                </div>
+
+                {/* Code Sessions Tabs */}
+                {codeSessions.length > 0 && (
+                  <div className="mb-4">
+                    <div className="flex gap-2 overflow-x-auto">
+                      {codeSessions.map((session) => (
+                        <button
+                          key={session.id}
+                          onClick={() => {
+                            setActiveCodeId(session.id)
+                            setEditingCode(session.code)
+                          }}
+                          className={`px-3 py-1 rounded text-sm whitespace-nowrap ${
+                            activeCodeId === session.id
+                              ? 'bg-purple-600 text-white'
+                              : 'bg-white/10 text-gray-300 hover:bg-white/20'
+                          }`}
+                        >
+                          {session.description.substring(0, 20)}...
+                          {session.versions.length > 0 && (
+                            <span className="ml-1 text-xs opacity-70">
+                              v{session.versions.length + 1}
+                            </span>
+                          )}
+                        </button>
+                      ))}
                     </div>
                   </div>
                 )}
-                {/* This div helps ensure we can scroll to the bottom */}
-                <div ref={messagesEndRef} style={{ height: '1px' }} />
-              </>
-            )}
-          </div>
 
-          {/* Search Status */}
-          {lastSearchInfo && messages.length > 0 && (
-            <div className="mb-4 p-3 bg-white/5 border border-white/10 rounded-lg">
-              <div className="flex items-center justify-between text-sm">
-                <div className="flex items-center gap-2 text-gray-400">
-                  {lastSearchInfo.performed ? (
-                    <>
-                      <Sparkles className="w-4 h-4 text-green-400" />
-                      <span>Searched for current information</span>
-                      {lastSearchInfo.query && (
-                        <span className="text-purple-300">"{lastSearchInfo.query}"</span>
+                {/* Code Editor */}
+                {activeCodeId ? (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between text-sm text-gray-400">
+                      <div className="flex items-center gap-2">
+                        <Edit3 className="w-4 h-4" />
+                        <span>AI-powered code editor with version control</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {containsPlottingCode(editingCode) && (
+                          <div className="text-yellow-400 text-xs flex items-center gap-1">
+                            <AlertCircle className="w-3 h-3" />
+                            Contains plotting code
+                          </div>
+                        )}
+                        <button
+                          onClick={() => copyCodeToClipboard(editingCode)}
+                          className="flex items-center gap-1 px-2 py-1 bg-white/10 rounded hover:bg-white/20"
+                        >
+                          {copiedCode === editingCode ? (
+                            <Check className="w-3 h-3 text-green-400" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                          Copy
+                        </button>
+                      </div>
+                    </div>
+                    
+                    {/* Plotting warning banner */}
+                    {containsPlottingCode(editingCode) && (
+                      <div className="bg-yellow-500/20 border border-yellow-500/30 rounded-lg p-3 text-yellow-200 text-sm">
+                        <div className="flex items-center gap-2">
+                          <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                          <div>
+                            <strong>Plotting Code Detected:</strong> This code contains matplotlib/plotting functions.
+                            <br />You can view and copy the code, but execution will be blocked.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    
+                    <textarea
+                      value={editingCode}
+                      onChange={(e) => setEditingCode(e.target.value)}
+                      className="w-full h-64 p-4 bg-gray-900 border border-gray-600 rounded text-green-400 font-mono text-sm resize-none focus:outline-none focus:ring-2 focus:ring-purple-500"
+                      placeholder="Your code will appear here..."
+                      style={{ fontFamily: 'Monaco, Consolas, "Lucida Console", monospace' }}
+                    />
+
+                    <div className="flex gap-2">
+                      {executing ? (
+                        // Show loading state during execution
+                        <button
+                          disabled
+                          className="flex-1 py-3 rounded font-semibold flex items-center justify-center gap-2 bg-gray-600 text-white cursor-not-allowed"
+                        >
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                          Executing...
+                        </button>
+                      ) : (
+                        <button
+                          onClick={async () => {
+                            // Skip infinite loop detection for plotting code since it won't execute anyway
+                            if (containsPlottingCode(editingCode)) {
+                              // Plotting code is already blocked, no need to check for loops
+                              return
+                            }
+                            
+                            // Check for potential infinite loops before execution
+                            const warnings = detectPotentialInfiniteLoops(editingCode)
+                            
+                            if (warnings.length > 0) {
+                              const warningMessage = `⚠️ Potential infinite loop detected:\n${warnings.join('\n')}\n\nThis code is blocked for safety. Please fix the issues and try again.`
+                              alert(warningMessage)
+                              return
+                            }
+                            
+                            await executeEditedCode()
+                          }}
+                          disabled={executing || !pyodideReady || containsPlottingCode(editingCode)}
+                          className={`flex-1 py-3 rounded font-semibold flex items-center justify-center gap-2 ${
+                            containsPlottingCode(editingCode)
+                              ? 'bg-yellow-600 text-white hover:bg-yellow-700'
+                              : 'bg-green-600 text-white hover:bg-green-700'
+                          } disabled:bg-gray-600`}
+                        >
+                          {pyodideReady ? (
+                            containsPlottingCode(editingCode) ? (
+                              <>
+                                <AlertCircle className="w-4 h-4" />
+                                Plotting Code (Cannot Execute)
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-4 h-4" />
+                                Run Code (Safe Mode)
+                              </>
+                            )
+                          ) : (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              Python Loading...
+                            </>
+                          )}
+                        </button>
                       )}
-                    </>
+                    </div>
+                    
+                    {/* Execution progress indicator */}
+                    {executing && (
+                      <div className="mt-2">
+                        <div className="flex justify-between text-xs text-gray-400 mb-1">
+                          <span>Executing code safely...</span>
+                          <span>Processing</span>
+                        </div>
+                        <div className="w-full bg-gray-700 rounded-full h-2">
+                          <div 
+                            className="h-2 rounded-full transition-all duration-300 bg-blue-500"
+                            style={{ width: `${executionProgress}%` }}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    
+                    {/* Enhanced execution guidelines */}
+                    <div className="text-xs text-gray-400 bg-white/5 rounded p-3">
+                      <strong className="text-white">AI Assistant Features:</strong>
+                      <div className="mt-1 space-y-1">
+                        <div>🤖 Natural language understanding</div>
+                        <div>🔄 Automatic version control</div>
+                        <div>✅ Contextual code editing</div>
+                        <div>🔒 Safe execution (infinite loops blocked)</div>
+                        <div>❌ Plotting libraries (use locally)</div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="text-gray-400 text-center py-16">
+                    <Code className="w-12 h-12 mx-auto mb-4 opacity-50" />
+                    <p>Ask for code in natural language to start...</p>
+                    <p className="text-sm mt-2">Try: "Print hello world" or "Calculate fibonacci"</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Output Panel */}
+              <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <Terminal className="w-5 h-5 text-green-400" />
+                  <h2 className="text-xl font-semibold text-white">Terminal Output</h2>
+                </div>
+                
+                <div className="bg-gray-900 text-green-400 p-4 rounded h-64 overflow-y-auto font-mono text-sm">
+                  {activeCodeId && codeSessions.find(s => s.id === activeCodeId)?.result ? (
+                    (() => {
+                      const result = codeSessions.find(s => s.id === activeCodeId)?.result
+                      return (
+                        <div>
+                          {result?.success ? (
+                            <div>
+                              <div className="text-green-400 mb-2">
+                                ✅ Executed successfully in {result.executionTime?.toFixed(2)}ms
+                              </div>
+                              <pre className="whitespace-pre-wrap text-white">
+                                {result.output}
+                              </pre>
+                            </div>
+                          ) : (
+                            <div>
+                              <div className="text-red-400 mb-2">
+                                ❌ Execution failed in {result?.executionTime?.toFixed(2)}ms
+                              </div>
+                              <pre className="whitespace-pre-wrap text-red-300">
+                                {result?.error}
+                              </pre>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })()
                   ) : (
-                    <>
-                      <MessageCircle className="w-4 h-4 text-blue-400" />
-                      <span>Used existing knowledge</span>
-                    </>
+                    <div className="text-gray-500">
+                      {activeCodeId 
+                        ? pyodideReady 
+                          ? "Click 'Run Code' to execute your code..." 
+                          : "Waiting for Python to load..."
+                        : "Terminal output will appear here..."}
+                    </div>
                   )}
                 </div>
-                <span className="text-gray-500">
-                  {lastSearchInfo.responseTime.toFixed(2)}s
-                </span>
+
+                {/* Code Sessions History with version info */}
+                {codeSessions.length > 1 && (
+                  <div className="mt-4">
+                    <h3 className="font-semibold mb-2 text-white text-sm">Code Sessions</h3>
+                    <div className="space-y-2 max-h-24 overflow-y-auto">
+                      {codeSessions.slice().reverse().map((session) => (
+                        <div 
+                          key={session.id}
+                          className={`text-sm p-2 rounded cursor-pointer transition-colors ${
+                            activeCodeId === session.id
+                              ? 'bg-purple-600/30 border border-purple-500'
+                              : 'bg-white/5 hover:bg-white/10'
+                          }`}
+                          onClick={() => {
+                            setActiveCodeId(session.id)
+                            setEditingCode(session.code)
+                          }}
+                        >
+                          <span className={session.result?.success ? 'text-green-400' : session.result ? 'text-red-400' : 'text-gray-400'}>
+                            {session.result?.success ? '✅' : session.result ? '❌' : '⚪'}
+                          </span>
+                          <span className="ml-2 text-gray-400">
+                            {new Date(session.timestamp).toLocaleTimeString()}
+                          </span>
+                          <span className="ml-2 text-gray-300">
+                            {session.description.substring(0, 30)}...
+                          </span>
+                          {session.versions.length > 0 && (
+                            <span className="ml-2 text-xs text-purple-300">
+                              v{session.versions.length + 1}
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-            </div>
-          )}
-
-          {/* Input Form */}
-          <form onSubmit={handleSubmit} className="flex gap-2">
-            <input
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="Type your message..."
-              className="flex-1 px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-              disabled={loading}
-            />
-            <button
-              type="submit"
-              disabled={loading || !input.trim()}
-              className="px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg transition-colors"
-            >
-              {loading ? (
-                <Loader2 className="w-5 h-5 text-white animate-spin" />
-              ) : (
-                <Search className="w-5 h-5 text-white" />
-              )}
-            </button>
-            {messages.length > 0 && (
-              <button
-                type="button"
-                onClick={clearChat}
-                className="px-4 py-3 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
-                title="Clear conversation"
-              >
-                <Trash2 className="w-5 h-5 text-white" />
-              </button>
-            )}
-          </form>
-
-          {/* Error Message */}
-          {error && (
-            <div className="mt-4 p-3 bg-red-500/20 border border-red-500/30 rounded-lg text-red-200 text-sm">
-              {error}
             </div>
           )}
         </div>
 
-        {/* Sources section remains the same */}
+        {/* Sources section */}
         {lastSearchInfo?.performed && lastSearchInfo.sources.length > 0 && (
-          <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6">
+          <div className="mt-6 bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6">
             <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
               <ExternalLink className="w-5 h-5" />
               Sources Used ({lastSearchInfo.sources.length})

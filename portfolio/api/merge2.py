@@ -318,28 +318,63 @@ class AISearchEngine:
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1'
         }
-    
+
+    def _create_fallback_results(self, query: str, num_results: int) -> List[Dict]:
+        """Create fallback results when search fails"""
+        fallback_results = []
+        
+        # Create some generic fallback sources
+        fallback_sources = [
+            {
+                "title": f"Search results for: {query}",
+                "url": f"https://duckduckgo.com/?q={urllib.parse.quote_plus(query)}",
+                "snippet": f"I wasn't able to retrieve current search results for '{query}'. You can try searching directly on DuckDuckGo.",
+                "rank": 1
+            },
+            {
+                "title": f"Google search: {query}",
+                "url": f"https://google.com/search?q={urllib.parse.quote_plus(query)}",
+                "snippet": f"Alternative search option for '{query}' on Google.",
+                "rank": 2
+            },
+            {
+                "title": f"Bing search: {query}",
+                "url": f"https://bing.com/search?q={urllib.parse.quote_plus(query)}",
+                "snippet": f"You can also try searching for '{query}' on Bing.",
+                "rank": 3
+            }
+        ]
+        
+        # Return only the requested number of results
+        return fallback_sources[:num_results]
+
     def search_duckduckgo(self, query: str, num_results: int = 5) -> List[Dict]:
-        """Improved HTTP-based search with better URL extraction"""
+        """Enhanced search with better debugging"""
         search_results = []
         
         try:
             log_memory("HTTP_SEARCH_START")
+            logger.info(f"Starting search for: '{query}'")
             
-            # Try multiple search approaches
+            # Try instant API first
             search_results = self._search_duckduckgo_instant(query, num_results)
+            logger.info(f"Instant API returned {len(search_results)} results")
             
             if not search_results:
                 # Fallback to HTML scraping
+                logger.info("Trying HTML scraping fallback")
                 search_results = self._search_duckduckgo_html(query, num_results)
+                logger.info(f"HTML scraping returned {len(search_results)} results")
+            
+            if not search_results:
+                logger.warning("No results from any search method, using fallback")
+                search_results = self._create_fallback_results(query, num_results)
             
             log_memory("SEARCH_EXTRACTION_COMPLETE")
+            logger.info(f"Final result count: {len(search_results)}")
             
         except Exception as e:
-            logger.error(f"HTTP search error: {e}")
-            log_memory("HTTP_SEARCH_ERROR")
-            
-            # Create working fallback results
+            logger.error(f"Search completely failed: {e}")
             search_results = self._create_fallback_results(query, num_results)
         finally:
             log_memory("HTTP_SEARCH_CLEANUP")
@@ -376,63 +411,100 @@ class AISearchEngine:
             return []
 
     def _search_duckduckgo_html(self, query: str, num_results: int) -> List[Dict]:
-        """Fallback HTML scraping method"""
+        """Improved HTML scraping method with better selectors"""
         search_results = []
         
         try:
             encoded_query = urllib.parse.quote_plus(query)
-            search_url = f"https://html.duckduckgo.com/html/?q={encoded_query}"
+            # Try different DuckDuckGo endpoints
+            search_urls = [
+                f"https://duckduckgo.com/html/?q={encoded_query}",
+                f"https://html.duckduckgo.com/html/?q={encoded_query}",
+                f"https://lite.duckduckgo.com/lite/?q={encoded_query}"
+            ]
             
-            response = requests.get(search_url, headers=self.headers, timeout=15)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Look for result links more specifically
-            result_links = soup.find_all('a', {'class': 'result__a'})
-
-            for i, link in enumerate(result_links[:num_results]):
+            for search_url in search_urls:
                 try:
-                    title = link.get_text().strip()
-                    href = link.get('href', '')
+                    response = requests.get(search_url, headers=self.headers, timeout=15)
+                    response.raise_for_status()
                     
-                    # Extract real URL from DuckDuckGo redirect
-                    real_url = self._extract_real_url(href)
+                    soup = BeautifulSoup(response.content, 'html.parser')
                     
-                    if not real_url:
+                    # Try multiple selectors for results
+                    result_selectors = [
+                        'a.result__a',  # Current selector
+                        '.result__title a',
+                        '.web-result__title-link',
+                        '.result .result-title a'
+                    ]
+                    
+                    for selector in result_selectors:
+                        result_links = soup.select(selector)
+                        if result_links:
+                            logger.info(f"Found {len(result_links)} results with selector: {selector}")
+                            break
+                    
+                    if not result_links:
+                        logger.warning(f"No results found with any selector on {search_url}")
                         continue
+
+                    for i, link in enumerate(result_links[:num_results]):
+                        try:
+                            title = link.get_text().strip()
+                            href = link.get('href', '')
+                            
+                            if not title or not href:
+                                continue
+                            
+                            # Extract real URL from DuckDuckGo redirect
+                            real_url = self._extract_real_url(href)
+                            
+                            if not real_url or 'duckduckgo.com' in real_url:
+                                continue
+                            
+                            # Find snippet - try multiple approaches
+                            snippet = ""
+                            parent = link.find_parent()
+                            while parent and not snippet:
+                                snippet_elem = parent.find(string=True)
+                                if snippet_elem and len(snippet_elem.strip()) > 50:
+                                    snippet = snippet_elem.strip()[:300]
+                                    break
+                                parent = parent.find_parent()
+                            
+                            if title and real_url:
+                                search_results.append({
+                                    "title": title,
+                                    "url": real_url,
+                                    "snippet": snippet or f"Search result for: {query}",
+                                    "rank": i + 1
+                                })
+                        except Exception as e:
+                            logger.warning(f"Error extracting result {i}: {e}")
+                            continue
                     
-                    # Find snippet in parent container
-                    snippet = ""
-                    parent = link.find_parent('div', class_='result')
-                    if parent:
-                        snippet_elem = parent.find('a', class_='result__snippet')
-                        if snippet_elem:
-                            snippet = snippet_elem.get_text().strip()[:300]
-                    
-                    if title and real_url:
-                        search_results.append({
-                            "title": title,
-                            "url": real_url,
-                            "snippet": snippet,
-                            "rank": i + 1
-                        })
+                    # If we found results, break from URL loop
+                    if search_results:
+                        logger.info(f"Successfully found {len(search_results)} results")
+                        break
+                        
                 except Exception as e:
-                    logger.warning(f"Error extracting result {i}: {e}")
+                    logger.warning(f"Failed to search {search_url}: {e}")
                     continue
-                
+            
+            return search_results
+            
         except Exception as e:
-            logger.error(f"HTML search error: {e}")
-        
-        return search_results
+            logger.error(f"HTML search completely failed: {e}")
+            return []
 
     def _extract_real_url(self, duckduckgo_url: str) -> str:
-        """Extract the real URL from DuckDuckGo's redirect URL"""
+        """Improved URL extraction"""
         if not duckduckgo_url:
             return ""
         
         try:
-            # Handle DuckDuckGo redirect URLs
+            # Handle different DuckDuckGo redirect patterns
             if duckduckgo_url.startswith('/l/?'):
                 # Parse redirect URL
                 parsed = urllib.parse.parse_qs(urllib.parse.urlparse(duckduckgo_url).query)
@@ -444,33 +516,13 @@ class AISearchEngine:
                 return 'https:' + duckduckgo_url
             elif duckduckgo_url.startswith('/'):
                 return 'https://duckduckgo.com' + duckduckgo_url
-            elif not duckduckgo_url.startswith(('http://', 'https://')):
-                return 'https://' + duckduckgo_url
-            else:
+            elif duckduckgo_url.startswith('http'):
                 return duckduckgo_url
-        except:
+            else:
+                return 'https://' + duckduckgo_url
+        except Exception as e:
+            logger.error(f"URL extraction failed: {e}")
             return duckduckgo_url
-
-    def _create_fallback_results(self, query: str, num_results: int) -> List[Dict]:
-        """Create working fallback results when search fails"""
-        fallback_sources = [
-            {"title": f"Wikipedia search for: {query}", "url": f"https://en.wikipedia.org/wiki/Special:Search/{urllib.parse.quote_plus(query)}"},
-            {"title": f"Google search for: {query}", "url": f"https://www.google.com/search?q={urllib.parse.quote_plus(query)}"},
-            {"title": f"Bing search for: {query}", "url": f"https://www.bing.com/search?q={urllib.parse.quote_plus(query)}"},
-            {"title": f"DuckDuckGo search for: {query}", "url": f"https://duckduckgo.com/?q={urllib.parse.quote_plus(query)}"},
-            {"title": f"YouTube search for: {query}", "url": f"https://www.youtube.com/results?search_query={urllib.parse.quote_plus(query)}"}
-        ]
-        
-        results = []
-        for i, source in enumerate(fallback_sources[:num_results]):
-            results.append({
-                "title": source["title"],
-                "url": source["url"],
-                "snippet": f"Search for '{query}' on {source['title'].split(' search')[0]}",
-                "rank": i + 1
-            })
-        
-        return results
 
     def generate_response(self, query: str, search_results: List[Dict]) -> str:
         """Generate AI response based on search results"""
@@ -1038,324 +1090,7 @@ async def chat_with_search(request: ChatWithSearchRequest):
         finally:
             log_memory("CHAT_SEARCH_CLEANUP")
             gc.collect()
-# Add these new models after your existing models
 
-class CodeExecutionRequest(BaseModel):
-    code: str
-    language: str = "python"
-
-class CodeExecutionResponse(BaseModel):
-    success: bool
-    output: Optional[str] = None
-    error: Optional[str] = None
-    execution_method: str
-    language: str
-
-# Add this endpoint after your existing endpoints
-@app.post("/execute-code", response_model=CodeExecutionResponse)
-async def execute_code(request: CodeExecutionRequest):
-    """Send code to frontend for Pyodide execution"""
-    log_memory("CODE_EXECUTION_REQUEST")
-    
-    try:
-        # Validate code length
-        if len(request.code) > 10000:
-            raise HTTPException(400, "Code too long. Maximum 10,000 characters.")
-        
-        if not request.code.strip():
-            raise HTTPException(400, "Code cannot be empty")
-        
-        # For security, we don't execute code on the server
-        # Instead, we return it for browser-based execution
-        logger.info(f"Code execution request received: {len(request.code)} characters")
-        
-        return CodeExecutionResponse(
-            success=True,
-            output=None,
-            error=None,
-            execution_method="pyodide_browser",
-            language=request.language
-        )
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Code execution request failed: {str(e)}")
-        raise HTTPException(500, f"Code execution request failed: {str(e)}")
-    finally:
-        log_memory("CODE_EXECUTION_CLEANUP")
-
-# Add AI code generation endpoint
-@app.post("/generate-code")
-async def generate_code(request: dict):
-    """Generate code based on user description"""
-    log_memory("CODE_GENERATION_START")
-    
-    try:
-        description = request.get("description", "").strip()
-        language = request.get("language", "python")
-        
-        if not description:
-            raise HTTPException(400, "Description cannot be empty")
-        
-        if len(description) > 1000:
-            raise HTTPException(400, "Description too long. Maximum 1,000 characters.")
-        
-        # AI prompt for code generation
-        code_prompt = f"""
-        Generate clean, executable {language} code based on this description: "{description}"
-        
-        Requirements:
-        - Return ONLY the code, no explanations
-        - Make it simple and appropriate to the request
-        - For simple requests (like "hello world", "print something"), use basic Python
-        - For data analysis, use appropriate libraries (pandas, numpy) 
-        - Include basic error handling only when needed
-        - Add helpful comments only for complex code
-        - DO NOT use matplotlib, seaborn, plotly or any plotting libraries
-        - Use print() statements for output
-        
-        IMPORTANT VISUALIZATION HANDLING:
-        - If user asks for "plot", "chart", "graph" or "visualize" with data context: create text-based charts using ASCII characters
-        - If user asks for visualization WITHOUT specific data: create sample data and text-based visualization
-        - If user asks to "plot a [object]" (like "plot a cat"): this is ASCII art, create simple text art
-        - Always prefer data processing over ASCII art unless clearly asking for art/drawings
-        
-        Examples:
-        - "hello world" → print("Hello, World!")
-        - "plot a cat" → ASCII art of a cat
-        - "bar chart" → ask for data or create sample data with text-based bar chart
-        - "plot sales data" → create sample sales data with ASCII chart
-        - "calculate fibonacci" → use basic Python with functions
-        - "analyze data" → use pandas/numpy when appropriate
-        
-        Keep it simple unless the request specifically requires complexity.
-        
-        Code:
-        """
-        
-        log_memory("BEFORE_CODE_GENERATION_AI")
-        response = chat_model.generate_content(code_prompt)
-        log_memory("AFTER_CODE_GENERATION_AI")
-        
-        generated_code = response.text or ""
-        
-        # Clean up the response to extract just the code
-        cleaned_code = extract_code_from_response(generated_code)
-        
-        logger.info(f"Generated {len(cleaned_code)} characters of {language} code")
-        
-        return {
-            "success": True,
-            "code": cleaned_code,
-            "language": language,
-            "description": description
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Code generation failed: {str(e)}")
-        raise HTTPException(500, f"Code generation failed: {str(e)}")
-    finally:
-        log_memory("CODE_GENERATION_CLEANUP")
-
-@app.post("/analyze-code-action")
-async def analyze_code_action(request: dict):
-    """Analyze user intent for code-related actions using AI"""
-    log_memory("CODE_ACTION_ANALYSIS_START")
-    
-    try:
-        user_message = request.get("user_message", "")
-        has_active_code = request.get("has_active_code", False)
-        code_context = request.get("code_context", "")
-        conversation_context = request.get("conversation_context", [])
-        
-        if not user_message.strip():
-            raise HTTPException(400, "User message cannot be empty")
-        
-        if len(user_message) > 500:
-            raise HTTPException(400, "User message too long. Maximum 500 characters.")
-        
-        # Build context for AI analysis
-        analysis_prompt = f"""
-        Analyze this user message to determine their intent regarding code operations.
-        
-        User message: "{user_message}"
-        Has active code session: {has_active_code}
-        Code context: {code_context[:200] if code_context else "None"}
-        Recent conversation: {str(conversation_context)}
-        
-        Determine the user's intent and respond with EXACTLY this JSON format:
-        {{
-            "action": "generate",
-            "confidence": 0.8,
-            "context": {{
-                "isPlottingRelated": false,
-                "hasCodeContext": {str(has_active_code).lower()},
-                "needsExecution": false,
-                "versionRequest": {{
-                    "type": "previous",
-                    "steps": 1
-                }}
-            }}
-        }}
-        
-        Actions:
-        - generate: User wants new code created (e.g., "print hello", "calculate fibonacci")
-        - edit: User wants existing code modified (e.g., "change it to", "update it", "modify")
-        - execute: User wants to run current code (e.g., "run it", "execute", "try it")
-        - revert: User wants to go back to previous version (e.g., "go back", "previous version", "undo")
-        - question: User is asking about code/programming concepts
-        - none: Not code-related
-        
-        Set isPlottingRelated to true if user mentions: plot, chart, graph, visualize, matplotlib, seaborn
-        Set needsExecution to true if user wants to run code
-        Set versionRequest only if user wants to revert/go back
-        
-        Examples:
-        "print hello world" → generate
-        "change it to print Brian" → edit  
-        "go back to previous version" → revert
-        "run this code" → execute
-        "what is a loop?" → question
-        "create a bar chart" → generate (with isPlottingRelated: true)
-        
-        Respond ONLY with the JSON object, no other text.
-        """
-        
-        log_memory("BEFORE_ACTION_ANALYSIS_AI")
-        
-        # Use your existing AI model (Gemini)
-        response = chat_model.generate_content(analysis_prompt)
-        analysis_result = response.text.strip()
-        
-        log_memory("AFTER_ACTION_ANALYSIS_AI")
-        
-        # Try to parse JSON response
-        try:
-            import json
-            # Clean up the response to extract JSON
-            if '```json' in analysis_result:
-                analysis_result = analysis_result.split('```json')[1].split('```')[0].strip()
-            elif '```' in analysis_result:
-                analysis_result = analysis_result.split('```')[1].strip()
-            
-            result = json.loads(analysis_result)
-            
-            # Validate the result structure
-            if not isinstance(result, dict) or 'action' not in result:
-                raise ValueError("Invalid response structure")
-            
-            # Ensure required fields exist with defaults
-            result.setdefault('confidence', 0.7)
-            result.setdefault('context', {})
-            
-            logger.info(f"Code action analysis: {result['action']} (confidence: {result.get('confidence', 0.7)})")
-            return result
-            
-        except (json.JSONDecodeError, ValueError) as e:
-            logger.error(f"JSON parsing failed: {e}, Raw response: {analysis_result}")
-            # Fallback to keyword-based analysis
-            return analyze_code_action_fallback(user_message, has_active_code)
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Code action analysis error: {e}")
-        log_memory("CODE_ACTION_ANALYSIS_ERROR")
-        return analyze_code_action_fallback(user_message, has_active_code)
-    finally:
-        log_memory("CODE_ACTION_ANALYSIS_CLEANUP")
-
-def extract_code_from_response(text: str) -> str:
-    """Extract code from AI response"""
-    import re
-    
-    # Look for code blocks
-    code_patterns = [
-        r'```python\n(.*?)\n```',
-        r'```\n(.*?)\n```',
-        r'```python(.*?)```',
-        r'```(.*?)```'
-    ]
-    
-    for pattern in code_patterns:
-        matches = re.findall(pattern, text, re.DOTALL)
-        if matches:
-            return matches[0].strip()
-    
-    # If no code blocks found, return the whole text cleaned up
-    lines = text.split('\n')
-    code_lines = []
-    in_code = False
-    
-    for line in lines:
-        # Skip explanation lines
-        if any(word in line.lower() for word in ['here', 'this code', 'explanation', 'note:']):
-            continue
-        if line.strip().startswith('#') or line.strip().startswith('import') or line.strip().startswith('def') or line.strip().startswith('for') or line.strip().startswith('if') or line.strip().startswith('while') or line.strip().startswith('print') or line.strip().startswith('return') or in_code:
-            in_code = True
-            code_lines.append(line)
-        elif in_code and line.strip() == '':
-            code_lines.append(line)
-        elif in_code and not line.strip():
-            continue
-    
-    return '\n'.join(code_lines) if code_lines else text.strip()
-
-def analyze_code_action_fallback(user_message: str, has_active_code: bool) -> dict:
-    """Fallback analysis using keyword matching when AI parsing fails"""
-    user_message_lower = user_message.lower()
-    
-    # Check for simple requests first (higher priority)
-    simple_keywords = ['hello', 'hello world', 'print hello', 'print hi']
-    generate_keywords = ['print', 'calculate', 'create', 'write', 'make', 'generate', 'show', 'display', 'code']
-    edit_keywords = ['change', 'modify', 'update', 'edit', 'alter', 'fix']
-    execute_keywords = ['run', 'execute', 'try', 'test']
-    revert_keywords = ['back', 'previous', 'undo', 'revert', 'before']
-    question_keywords = ['what', 'how', 'why', 'explain', '?']
-    plotting_keywords = ['plot', 'chart', 'graph', 'visualize', 'matplotlib', 'seaborn', 'histogram', 'scatter']
-    
-    # Determine action based on keywords (prioritize simple over plotting)
-    if any(keyword in user_message_lower for keyword in revert_keywords):
-        action = "revert"
-        confidence = 0.8
-    elif has_active_code and any(keyword in user_message_lower for keyword in edit_keywords):
-        action = "edit"
-        confidence = 0.7
-    elif any(keyword in user_message_lower for keyword in execute_keywords):
-        action = "execute"
-        confidence = 0.8
-    elif any(keyword in user_message_lower for keyword in simple_keywords):
-        action = "generate"
-        confidence = 0.9  # High confidence for simple requests
-    elif any(keyword in user_message_lower for keyword in generate_keywords):
-        action = "generate"
-        confidence = 0.6
-    elif any(keyword in user_message_lower for keyword in question_keywords):
-        action = "question"
-        confidence = 0.5
-    else:
-        action = "generate"  # Default fallback
-        confidence = 0.3
-    
-    # Check for plotting context (but don't let it override simple requests)
-    is_plotting_related = any(keyword in user_message_lower for keyword in plotting_keywords) and not any(keyword in user_message_lower for keyword in simple_keywords)
-    
-    return {
-        "action": action,
-        "confidence": confidence,
-        "context": {
-            "isPlottingRelated": is_plotting_related,
-            "hasCodeContext": has_active_code,
-            "needsExecution": action == "execute",
-            "versionRequest": {
-                "type": "previous",
-                "steps": 1
-            } if action == "revert" else None
-        }
-    }
 # ADDITIONAL ENDPOINTS
 @app.post("/switch-context")
 async def switch_context(request: dict):
