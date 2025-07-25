@@ -174,17 +174,72 @@ export default function SearchPage() {
     }
   }
 
+  // Function to move matplotlib canvases to our output container
+  const moveMatplotlibCanvases = () => {
+    setTimeout(() => {
+      const container = document.getElementById('matplotlib-output-container')
+      if (!container) return
+
+      // Find all matplotlib canvases (but not rubberband)
+      const canvases = document.querySelectorAll('canvas[id*="matplotlib"]:not([id*="rubberband"])')
+      
+      canvases.forEach(canvas => {
+        // Only move if it's not already in our container
+        if (!container.contains(canvas)) {
+          // Remove any existing canvases in container first
+          const existingCanvases = container.querySelectorAll('canvas')
+          existingCanvases.forEach(existing => existing.remove())
+          
+          // Move the new canvas to our container
+          container.appendChild(canvas)
+          
+          // Add a download button for the plot
+          const downloadBtn = document.createElement('button')
+          downloadBtn.innerHTML = '📊 Save Plot'
+          downloadBtn.className = 'mt-2 px-3 py-1 bg-blue-600 hover:bg-blue-700 text-white text-xs rounded cursor-pointer'
+          downloadBtn.onclick = () => {
+            // Convert canvas to blob and download
+            const canvas = container.querySelector('canvas') as HTMLCanvasElement
+            if (canvas) {
+              canvas.toBlob(blob => {
+                if (blob) {
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = 'matplotlib_plot.png'
+                  a.click()
+                  URL.revokeObjectURL(url)
+                }
+              })
+            }
+          }
+          container.appendChild(downloadBtn)
+        }
+      })
+    }, 500) // Give matplotlib time to create the canvas
+  }
+
   // Function to generate or edit code using AI
   const generateOrEditCode = async (message: string, existingCode?: string): Promise<{code: string, requiredPackages: string[]} | null> => {
     if (!apiUrl) return null
     
     try {
-      // Format the description for the API with explicit no-plotting instruction
+      // Check if user specifically requests plotting libraries
+      const requestsPlotting = /matplotlib|seaborn|plotly|plot.*with|chart.*with|graph.*with/i.test(message)
+      
+      // Format the description for the API
       let description = message
       if (existingCode) {
-        description = `${message}\n\nExisting code to modify:\n${existingCode}\n\nIMPORTANT: Do not use matplotlib, seaborn, plotly or any plotting libraries. Focus on data processing, calculations, and text output only.`
-      } else {
-        description = `${message}\n\nIMPORTANT: Do not use matplotlib, seaborn, plotly or any plotting libraries. Focus on data processing, calculations, and text output only. Use print() statements to show results.`
+        description = `${message}\n\nExisting code to modify:\n${existingCode}`
+      }
+      
+      // Only add anti-plotting instruction if plotting is NOT specifically requested
+      if (!requestsPlotting) {
+        if (existingCode) {
+          description += `\n\nIMPORTANT: Do not use matplotlib, seaborn, plotly or any plotting libraries. Focus on data processing, calculations, and text output only.`
+        } else {
+          description += `\n\nIMPORTANT: Do not use matplotlib, seaborn, plotly or any plotting libraries. Focus on data processing, calculations, and text output only. Use print() statements to show results.`
+        }
       }
       
       const response = await fetch(`${apiUrl}/generate-code`, {
@@ -270,6 +325,11 @@ export default function SearchPage() {
       setCodeSessions(prev => prev.map(s => 
         s.id === activeCodeId ? { ...s, result, code: editingCode } : s
       ))
+      
+      // If the code contains plotting, move matplotlib canvases to our container
+      if (containsPlottingCode(editingCode)) {
+        moveMatplotlibCanvases()
+      }
       
     } catch (error) {
       console.error('Execution error:', error)
@@ -454,7 +514,7 @@ export default function SearchPage() {
     return baseMessage + context
   }
 
-  // Analyze code to determine required packages (excluding plotting libraries)
+  // Analyze code to determine required packages (now including plotting libraries)
   const analyzeCodePackages = (code: string): string[] => {
     const packages = []
     const lines = code.toLowerCase()
@@ -464,6 +524,9 @@ export default function SearchPage() {
     if (lines.includes('import scipy') || lines.includes('from scipy')) packages.push('scipy')
     if (lines.includes('import sklearn') || lines.includes('from sklearn')) packages.push('scikit-learn')
     if (lines.includes('import requests') || lines.includes('from requests')) packages.push('requests')
+    if (lines.includes('import matplotlib') || lines.includes('from matplotlib')) packages.push('matplotlib')
+    if (lines.includes('import seaborn') || lines.includes('from seaborn')) packages.push('seaborn')
+    if (lines.includes('import plotly') || lines.includes('from plotly')) packages.push('plotly')
     
     return [...new Set(packages)]
   }
@@ -572,7 +635,7 @@ export default function SearchPage() {
     }
   }
 
-  // Load packages on demand (excluding plotting libraries)
+  // Load packages on demand (now including plotting libraries)
   const loadPackageIfNeeded = async (packages: string[]): Promise<void> => {
     const packagesToLoad = packages.filter(pkg => !loadedPackages.has(pkg))
     
@@ -589,7 +652,7 @@ export default function SearchPage() {
     }
   }
 
-  // Enhanced code execution with safety checks
+  // Enhanced code execution with plotting support
   const executeCode = async (code: string, requiredPackages: string[] = []): Promise<ExecutionResult> => {
     if (!pyodideReady) {
       return {
@@ -599,15 +662,7 @@ export default function SearchPage() {
       }
     }
 
-    if (containsPlottingCode(code)) {
-      return {
-        success: false,
-        error: "❌ Plotting libraries (matplotlib, seaborn, plotly) are not supported in code execution.\n\nYou can still generate plotting code for reference, but execution is limited to:\n• Data processing (numpy, pandas)\n• Calculations and algorithms\n• Text processing\n• Basic Python operations\n\nTip: Ask for 'code without plotting' or 'data processing code' instead.",
-        executionTime: 0
-      }
-    }
-
-    // Check for dangerous patterns before execution
+    // Check for dangerous patterns before execution (but allow plotting)
     const warnings = detectPotentialInfiniteLoops(code)
     if (warnings.length > 0) {
       return {
@@ -620,11 +675,8 @@ export default function SearchPage() {
     const startTime = performance.now()
     
     try {
-      const allowedPackages = requiredPackages.filter(pkg => 
-        !['matplotlib', 'seaborn', 'plotly'].includes(pkg)
-      )
-      
-      await loadPackageIfNeeded(allowedPackages)
+      // Load all required packages (including plotting libraries)
+      await loadPackageIfNeeded(requiredPackages)
       
       // Set up clean execution environment
       await window.pyodide.runPython(`
@@ -640,7 +692,7 @@ sys.stdout = _stdout_buffer
 sys.stderr = _stderr_buffer
       `)
       
-      // Execute the code directly (no timeout needed since we pre-check for dangerous patterns)
+      // Execute the code directly
       await window.pyodide.runPython(code)
       
       // Get output
@@ -658,6 +710,24 @@ sys.stderr = _old_stderr
       let finalOutput = ''
       if (stdout) finalOutput += stdout
       if (stderr) finalOutput += (finalOutput ? '\n' : '') + stderr
+      
+      // Check if matplotlib plot was created and saved
+      if (containsPlottingCode(code)) {
+        try {
+          // Try to get the plot as base64 if it was saved
+          const plotExists = await window.pyodide.runPython(`
+import os
+'plot.png' in os.listdir() if os.path.exists('.') else False
+          `)
+          
+          if (plotExists) {
+            finalOutput += '\n\n📊 Plot saved successfully as plot.png'
+            // You could potentially convert the plot to base64 and display it here
+          }
+        } catch (plotError) {
+          console.log('Plot check failed:', plotError)
+        }
+      }
       
       if (!finalOutput.trim()) {
         finalOutput = 'Code executed successfully (no output)'
@@ -952,6 +1022,62 @@ sys.stderr = _old_stderr
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900">
+      {/* Style matplotlib canvases to appear in the output panel */}
+      <style>{`
+        /* Target matplotlib canvas elements */
+        canvas[id*="matplotlib"] {
+          position: relative !important;
+          left: auto !important;
+          top: auto !important;
+          z-index: 1 !important;
+          max-width: 100% !important;
+          height: auto !important;
+          width: auto !important;
+          border-radius: 8px;
+          box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+          background: white;
+          margin: 10px 0;
+        }
+        
+        /* Hide the rubberband overlay since we don't need interactivity */
+        canvas[id*="rubberband"] {
+          display: none !important;
+        }
+        
+        /* Hide matplotlib toolbar and figure title */
+        div[id*="matplotlib"] div[id*="top"] {
+          display: none !important;
+        }
+        
+        /* Hide the entire toolbar container */
+        div[id*="matplotlib"] > div:last-child {
+          display: none !important;
+        }
+        
+        /* Hide matplotlib toolbar buttons */
+        .matplotlib-toolbar-button {
+          display: none !important;
+        }
+        
+        /* Hide matplotlib message div */
+        div[id*="message"] {
+          display: none !important;
+        }
+        
+        /* Ensure matplotlib elements appear in the output container */
+        .matplotlib-container canvas[id*="matplotlib"] {
+          display: block;
+          margin: 0 auto;
+        }
+        
+        /* Style the matplotlib container itself */
+        div[id*="matplotlib"] {
+          background: transparent !important;
+          border: none !important;
+          margin: 10px 0 !important;
+        }
+      `}</style>
+      
       <div className="container mx-auto px-4 py-8 max-w-7xl">
         {/* Header */}
         <div className="text-center mb-8">
@@ -1218,12 +1344,6 @@ sys.stderr = _old_stderr
                         <span>AI-powered code editor with version control</span>
                       </div>
                       <div className="flex items-center gap-2">
-                        {containsPlottingCode(editingCode) && (
-                          <div className="text-yellow-400 text-xs flex items-center gap-1">
-                            <AlertCircle className="w-3 h-3" />
-                            Contains plotting code
-                          </div>
-                        )}
                         <button
                           onClick={() => copyCodeToClipboard(editingCode)}
                           className="flex items-center gap-1 px-2 py-1 bg-white/10 rounded hover:bg-white/20"
@@ -1237,19 +1357,6 @@ sys.stderr = _old_stderr
                         </button>
                       </div>
                     </div>
-                    
-                    {/* Plotting warning banner */}
-                    {containsPlottingCode(editingCode) && (
-                      <div className="bg-yellow-500/20 border border-yellow-500/30 rounded-lg p-3 text-yellow-200 text-sm">
-                        <div className="flex items-center gap-2">
-                          <AlertCircle className="w-4 h-4 flex-shrink-0" />
-                          <div>
-                            <strong>Plotting Code Detected:</strong> This code contains matplotlib/plotting functions.
-                            <br />You can view and copy the code, but execution will be blocked.
-                          </div>
-                        </div>
-                      </div>
-                    )}
                     
                     <textarea
                       value={editingCode}
@@ -1272,12 +1379,6 @@ sys.stderr = _old_stderr
                       ) : (
                         <button
                           onClick={async () => {
-                            // Skip infinite loop detection for plotting code since it won't execute anyway
-                            if (containsPlottingCode(editingCode)) {
-                              // Plotting code is already blocked, no need to check for loops
-                              return
-                            }
-                            
                             // Check for potential infinite loops before execution
                             const warnings = detectPotentialInfiniteLoops(editingCode)
                             
@@ -1289,25 +1390,14 @@ sys.stderr = _old_stderr
                             
                             await executeEditedCode()
                           }}
-                          disabled={executing || !pyodideReady || containsPlottingCode(editingCode)}
-                          className={`flex-1 py-3 rounded font-semibold flex items-center justify-center gap-2 ${
-                            containsPlottingCode(editingCode)
-                              ? 'bg-yellow-600 text-white hover:bg-yellow-700'
-                              : 'bg-green-600 text-white hover:bg-green-700'
-                          } disabled:bg-gray-600`}
+                          disabled={executing || !pyodideReady}
+                          className="flex-1 py-3 rounded font-semibold flex items-center justify-center gap-2 bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-600"
                         >
                           {pyodideReady ? (
-                            containsPlottingCode(editingCode) ? (
-                              <>
-                                <AlertCircle className="w-4 h-4" />
-                                Plotting Code (Cannot Execute)
-                              </>
-                            ) : (
-                              <>
-                                <Play className="w-4 h-4" />
-                                Run Code (Safe Mode)
-                              </>
-                            )
+                            <>
+                              <Play className="w-4 h-4" />
+                              Run Code {containsPlottingCode(editingCode) ? '(with Plotting)' : '(Safe Mode)'}
+                            </>
                           ) : (
                             <>
                               <Loader2 className="w-4 h-4 animate-spin" />
@@ -1342,7 +1432,8 @@ sys.stderr = _old_stderr
                         <div>🔄 Automatic version control</div>
                         <div>✅ Contextual code editing</div>
                         <div>🔒 Safe execution (infinite loops blocked)</div>
-                        <div>❌ Plotting libraries (use locally)</div>
+                        <div>📊 Plotting libraries supported (matplotlib, seaborn, plotly)</div>
+                        <div>💾 Auto-save plots as PNG files</div>
                       </div>
                     </div>
                   </div>
@@ -1359,7 +1450,12 @@ sys.stderr = _old_stderr
               <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6">
                 <div className="flex items-center gap-2 mb-4">
                   <Terminal className="w-5 h-5 text-green-400" />
-                  <h2 className="text-xl font-semibold text-white">Terminal Output</h2>
+                  <h2 className="text-xl font-semibold text-white">Output & Visualization</h2>
+                </div>
+                
+                {/* Matplotlib container for external canvases */}
+                <div id="matplotlib-output-container" className="matplotlib-container mb-4">
+                  {/* Matplotlib canvases will be moved here via JavaScript */}
                 </div>
                 
                 <div className="bg-gray-900 text-green-400 p-4 rounded h-64 overflow-y-auto font-mono text-sm">
@@ -1396,7 +1492,7 @@ sys.stderr = _old_stderr
                         ? pyodideReady 
                           ? "Click 'Run Code' to execute your code..." 
                           : "Waiting for Python to load..."
-                        : "Terminal output will appear here..."}
+                        : "Terminal output and visualizations will appear here..."}
                     </div>
                   )}
                 </div>

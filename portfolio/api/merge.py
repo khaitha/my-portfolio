@@ -1109,25 +1109,32 @@ async def generate_code(request: dict):
         - Return ONLY the code, no explanations
         - Make it simple and appropriate to the request
         - For simple requests (like "hello world", "print something"), use basic Python
-        - For data analysis, use appropriate libraries (pandas, numpy) 
+        - For data analysis, use appropriate libraries (pandas, numpy)
         - Include basic error handling only when needed
         - Add helpful comments only for complex code
-        - DO NOT use matplotlib, seaborn, plotly or any plotting libraries
-        - Use print() statements for output
+        - Use print() statements for text output
         
-        IMPORTANT VISUALIZATION HANDLING:
-        - If user asks for "plot", "chart", "graph" or "visualize" with data context: create text-based charts using ASCII characters
-        - If user asks for visualization WITHOUT specific data: create sample data and text-based visualization
+        VISUALIZATION LIBRARIES HANDLING:
+        - If user specifically asks for matplotlib, seaborn, plotly: USE THEM! Pyodide supports these libraries
+        - When creating plots with matplotlib/seaborn:
+          * Import matplotlib.pyplot as plt
+          * Create the plot normally
+          * ALWAYS save the plot: plt.savefig('plot.png', dpi=100, bbox_inches='tight')
+          * ALWAYS call plt.show() to display the plot
+          * Add print statement: print("Plot saved as 'plot.png' and displayed above")
+        - If user asks for visualization WITHOUT specifying library: create text-based ASCII charts
         - If user asks to "plot a [object]" (like "plot a cat"): this is ASCII art, create simple text art
-        - Always prefer data processing over ASCII art unless clearly asking for art/drawings
         
         Examples:
         - "hello world" → print("Hello, World!")
         - "plot a cat" → ASCII art of a cat
-        - "bar chart" → ask for data or create sample data with text-based bar chart
-        - "plot sales data" → create sample sales data with ASCII chart
+        - "bar chart" → text-based ASCII bar chart with sample data
+        - "bar plot with matplotlib" → proper matplotlib bar plot with plt.savefig() and plt.show()
+        - "matplotlib bar chart" → proper matplotlib bar plot with saving and display
+        - "seaborn histogram" → proper seaborn histogram with saving and display
         - "calculate fibonacci" → use basic Python with functions
-        - "analyze data" → use pandas/numpy when appropriate
+        
+        IMPORTANT: When using matplotlib/seaborn, ALWAYS include both plt.savefig() and plt.show() to save and display plots.
         
         Keep it simple unless the request specifically requires complexity.
         
