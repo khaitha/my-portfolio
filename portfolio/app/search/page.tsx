@@ -251,14 +251,16 @@ export default function SearchPage() {
         })
       })
       
+      console.log('API response status:', response.status) // Debug log
+      
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}))
+        console.error('API error:', errorData) // Debug log
         throw new Error(errorData.detail || `HTTP ${response.status}: Code generation failed`)
       }
-      
+
       const data = await response.json()
-      
-      // Analyze the generated code for required packages
+      console.log('API response data:', data) // Debug log      // Analyze the generated code for required packages
       const requiredPackages = analyzeCodePackages(data.code || '')
       
       return {
@@ -284,9 +286,14 @@ export default function SearchPage() {
       versions: []
     }
     
+    console.log('Creating new code session:', sessionId, 'with description:', description) // Debug log
+    console.log('Session code:', code) // Debug log
+    
     setCodeSessions(prev => [...prev, newSession])
     setActiveCodeId(sessionId)
     setEditingCode(code)
+    
+    console.log('Active code ID set to:', sessionId) // Debug log
     
     return sessionId
   }
@@ -426,6 +433,13 @@ export default function SearchPage() {
       'draw a', 'create a chart', 'show a graph', 'make a plot'
     ]
     
+    // Check for explicit new code generation requests (higher priority)
+    const newCodeKeywords = [
+      'create a', 'make a', 'generate a', 'write a', 'do a', 'another',
+      'different', 'new', 'fresh', 'different ascii', 'another face',
+      'create ascii', 'make ascii', 'do another'
+    ]
+    
     // Check for version requests
     if (hasActiveCode && versionKeywords.some(kw => lowerText.includes(kw))) {
       return {
@@ -449,7 +463,16 @@ export default function SearchPage() {
       }
     }
     
-    // Check for edit requests
+    // Check for NEW CODE generation requests (prioritize over edit)
+    if (newCodeKeywords.some(kw => lowerText.includes(kw))) {
+      return {
+        action: 'generate',
+        confidence: 0.9,
+        context: { isPlottingRelated: plottingKeywords.some(kw => lowerText.includes(kw)) }
+      }
+    }
+    
+    // Check for edit requests (only if not asking for new code)
     if (hasActiveCode && editKeywords.some(kw => lowerText.includes(kw))) {
       return {
         action: 'edit',
@@ -813,6 +836,8 @@ sys.stderr = _old_stderr
       const analysis = await analyzeCodeAction(userMessage, !!activeCodeId, codeContext)
       
       console.log('Code action analysis:', analysis) // Debug log
+      console.log('Has active code:', !!activeCodeId) // Debug log
+      console.log('User message:', userMessage) // Debug log
 
       // Handle different actions based on AI analysis
       switch (analysis.action) {
@@ -829,12 +854,16 @@ sys.stderr = _old_stderr
           const smartMessage = createSmartContext(userMessage, activeCodeId || undefined)
           const codeResult = await generateOrEditCode(smartMessage)
           
+          console.log('Code generation result:', codeResult) // Debug log
+          
           if (codeResult) {
             const sessionId = createCodeSession(
               codeResult.code, 
               userMessage.length > 50 ? userMessage.substring(0, 50) + '...' : userMessage,
               codeResult.requiredPackages
             )
+            
+            console.log('Created session:', sessionId, 'with code:', codeResult.code) // Debug log
             
             setCodeSessionActive(true)
             
