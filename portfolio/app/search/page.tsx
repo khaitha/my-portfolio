@@ -1098,7 +1098,7 @@ sys.stderr = _old_stderr
             <h1 className="text-4xl font-bold text-white">kh.AI Search & Code</h1>
           </div>
           <p className="text-gray-300 text-lg">
-            Intelligent code assistant with contextual understanding and version control.
+            Intelligent Assistant. Chat, Search, and Code in Python.
           </p>
           
           {/* Enhanced Python Status */}
@@ -1134,7 +1134,7 @@ sys.stderr = _old_stderr
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
           <MessageCircle className="w-5 h-5 text-purple-400" />
-          <h2 className="text-xl font-semibold text-white">Intelligent Chat</h2>
+          <h2 className="text-xl font-semibold text-white">Chat</h2>
               </div>
               {codeSessionActive && (
           <div className="text-xs text-gray-400">
@@ -1150,14 +1150,13 @@ sys.stderr = _old_stderr
               style={{ scrollBehavior: 'smooth' }}
             >
               {messages.length === 0 ? (
-                <div className="text-gray-400 text-center py-16">
+                <div className="text-gray-400 px-110 py-16">
                   <MessageCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
                   <p>Start a conversation with your AI assistant...</p>
                   <div className="text-sm mt-4 space-y-1">
                     <p>• Natural language: "Print hello world"</p>
-                    <p>• Code editing: "Change it to print Brian"</p>
-                    <p>• Version control: "Go back to the previous version"</p>
                     <p>• Execution: "Run this code"</p>
+                    <p>• Code editing: Manual or With AI</p>
                     <p className="text-purple-400">🤖 Powered by intelligent context understanding</p>
                   </div>
                 </div>
