@@ -864,11 +864,22 @@ sys.stderr = _old_stderr
             )
             
             console.log('Created session:', sessionId, 'with code:', codeResult.code) // Debug log
+            console.log('Current active code ID before:', activeCodeId) // Debug log
+            console.log('Current code sessions before:', codeSessions.length) // Debug log
             
             setCodeSessionActive(true)
             
+            // Force a slight delay to ensure state updates
+            setTimeout(() => {
+              console.log('After state update - Active code ID:', activeCodeId) // Debug log
+              console.log('After state update - Code sessions:', codeSessions.length) // Debug log
+            }, 100)
+            
             // Add assistant response with code reference
             const responseMessage = `I've generated Python code for you! Here's what I created:\n\n\`\`\`python\n${codeResult.code}\n\`\`\`\n\nThe code is now available in the editor where you can run it, edit it, or ask for modifications. ${containsPlottingCode(codeResult.code) ? '\n\n⚠️ Note: This code contains plotting functions which cannot be executed in the browser, but you can copy it for local use.' : ''}`
+            
+            console.log('Response message created with code:', codeResult.code) // Debug log
+            console.log('Full response message:', responseMessage) // Debug log
             
             setMessages([...newMessages, { 
               role: 'assistant', 
