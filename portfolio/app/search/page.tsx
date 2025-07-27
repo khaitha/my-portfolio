@@ -1128,6 +1128,49 @@ sys.stderr = _old_stderr
           border: none !important;
           margin: 10px 0 !important;
         }
+        
+        /* Custom scrollbar styles for minimalistic look */
+        .scrollbar-thin {
+          scrollbar-width: thin;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar {
+          width: 6px;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-track {
+          background: transparent;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-thumb {
+          background-color: rgba(255, 255, 255, 0.2);
+          border-radius: 3px;
+          transition: background-color 0.2s ease;
+        }
+        
+        .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+          background-color: rgba(255, 255, 255, 0.3);
+        }
+        
+        /* Hide scrollbar when not needed */
+        .scrollbar-thin::-webkit-scrollbar {
+          width: 0px;
+          background: transparent;
+        }
+        
+        .scrollbar-thin:hover::-webkit-scrollbar {
+          width: 6px;
+        }
+        
+        /* For Firefox */
+        .scrollbar-thin {
+          scrollbar-width: none;
+        }
+        
+        .scrollbar-thin:hover {
+          scrollbar-width: thin;
+          scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+        }
       `}</style>
       
       <div className="container mx-auto px-4 py-8 max-w-7xl">
@@ -1170,7 +1213,7 @@ sys.stderr = _old_stderr
 
         <div className={`grid gap-6 ${codeSessionActive ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1'}`}>
           {/* Chat Section */}
-          <div className="bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6">
+          <div className={`bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-6 ${codeSessionActive ? 'h-[calc(100vh-12rem)]' : 'h-auto'} flex flex-col`}>
             <div className="flex items-center justify-between mb-4">
               <div className="flex items-center gap-2">
           <MessageCircle className="w-5 h-5 text-purple-400" />
@@ -1186,18 +1229,33 @@ sys.stderr = _old_stderr
             {/* Chat History */}
             <div 
               ref={chatContainerRef}
-              className="h-[28rem] overflow-y-auto mb-4 space-y-4 scroll-smooth"
+              className={`${codeSessionActive ? 'flex-1' : 'h-[32rem]'} overflow-y-auto mb-4 space-y-2 scroll-smooth bg-gradient-to-b from-transparent via-black/5 to-black/10 rounded-lg p-3 scrollbar-thin scrollbar-track-transparent scrollbar-thumb-white/20 hover:scrollbar-thumb-white/30`}
               style={{ scrollBehavior: 'smooth' }}
             >
               {messages.length === 0 ? (
-                <div className="text-gray-400 px-110 py-16">
-                  <MessageCircle className="w-12 h-12 mx-auto mb-4 opacity-50" />
-                  <p>Start a conversation with your AI assistant...</p>
-                  <div className="text-sm mt-4 space-y-1">
-                    <p>• Natural language: "Print hello world"</p>
-                    <p>• Execution: "Run this code"</p>
-                    <p>• Code editing: Manual or With AI</p>
-                    <p className="text-purple-400">🤖 Powered by intelligent context understanding</p>
+                <div className="text-gray-400 px-6 py-20 text-center">
+                  <div className="bg-white/5 rounded-full w-20 h-20 mx-auto mb-6 flex items-center justify-center">
+                    <MessageCircle className="w-10 h-10 opacity-50" />
+                  </div>
+                  <h3 className="text-lg font-medium text-white mb-4">Start your AI conversation</h3>
+                  <p className="text-gray-400 mb-6">Ask me anything or request code generation</p>
+                  <div className="text-sm space-y-2 bg-white/5 rounded-lg p-4 max-w-sm mx-auto">
+                    <div className="flex items-center gap-2 text-purple-300">
+                      <div className="w-2 h-2 bg-purple-400 rounded-full"></div>
+                      <span>Natural language: "Print hello world"</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-blue-300">
+                      <div className="w-2 h-2 bg-blue-400 rounded-full"></div>
+                      <span>Execution: "Run this code"</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-green-300">
+                      <div className="w-2 h-2 bg-green-400 rounded-full"></div>
+                      <span>Code editing: "Change the function"</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-purple-400 font-medium mt-3">
+                      <span>🤖</span>
+                      <span>Powered by intelligent context understanding</span>
+                    </div>
                   </div>
                 </div>
               ) : (
@@ -1205,40 +1263,81 @@ sys.stderr = _old_stderr
                   {messages.map((message, index) => (
                     <div
                       key={index}
-                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                      className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'} mb-4`}
                     >
                       <div
-                        className={`max-w-[85%] p-4 rounded-lg ${
+                        className={`max-w-[85%] p-4 rounded-lg shadow-lg ${
                           message.role === 'user'
-                            ? 'bg-purple-600 text-white'
-                            : 'bg-white/10 text-gray-200 border border-white/20'
+                            ? 'bg-gradient-to-r from-purple-600 to-purple-700 text-white'
+                            : 'bg-white/10 text-gray-200 border border-white/20 backdrop-blur-sm'
                         }`}
                       >
                         <div className="whitespace-pre-wrap">
-                          {message.content.split('**').map((part, partIndex) => (
-                            partIndex % 2 === 1 ? (
-                              <strong key={partIndex} className="font-semibold">{part}</strong>
-                            ) : (
-                              <span key={partIndex}>{part}</span>
-                            )
-                          ))}
+                          {message.content.split(/(\`\`\`[\s\S]*?\`\`\`|\*\*[^*]+\*\*)/g).map((part, partIndex) => {
+                            // Handle code blocks
+                            if (part.startsWith('```') && part.endsWith('```')) {
+                              const codeContent = part.slice(3, -3)
+                              const lines = codeContent.split('\n')
+                              const language = lines[0]
+                              const code = lines.slice(1).join('\n')
+                              
+                              return (
+                                <div key={partIndex} className="my-3">
+                                  <div className="bg-gray-900 rounded-lg overflow-hidden border border-gray-700">
+                                    {language && (
+                                      <div className="bg-gray-800 px-3 py-1 text-xs text-gray-300 border-b border-gray-700">
+                                        {language}
+                                      </div>
+                                    )}
+                                    <pre className="p-3 text-green-400 font-mono text-sm overflow-x-auto">
+                                      <code>{code}</code>
+                                    </pre>
+                                  </div>
+                                </div>
+                              )
+                            }
+                            // Handle bold text
+                            else if (part.startsWith('**') && part.endsWith('**')) {
+                              return (
+                                <strong key={partIndex} className="font-semibold text-white">
+                                  {part.slice(2, -2)}
+                                </strong>
+                              )
+                            }
+                            // Regular text
+                            return <span key={partIndex}>{part}</span>
+                          })}
                         </div>
                         
                         {message.hasCode && message.codeId && (
-                          <div className="mt-2 p-2 bg-white/10 rounded text-xs">
-                            <Code className="w-3 h-3 inline mr-1" />
-                            Code available in editor
+                          <div className="mt-3 p-3 bg-white/10 rounded-lg border border-white/20">
+                            <div className="flex items-center gap-2 text-sm">
+                              <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                              <Code className="w-4 h-4 text-green-400" />
+                              <span className="text-green-400 font-medium">Code ready in editor</span>
+                              <div className="ml-auto">
+                                <svg className="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                              </div>
+                            </div>
                           </div>
                         )}
                       </div>
                     </div>
                   ))}
                   {loading && (
-                    <div className="flex justify-start">
-                      <div className="bg-white/10 border border-white/20 rounded-lg p-4">
-                        <div className="flex items-center gap-2 text-gray-300">
-                          <Loader2 className="w-4 h-4 animate-spin" />
-                          <span>Thinking and searching when needed...</span>
+                    <div className="flex justify-start mb-4">
+                      <div className="bg-white/10 border border-white/20 rounded-lg p-4 backdrop-blur-sm shadow-lg">
+                        <div className="flex items-center gap-3 text-gray-300">
+                          <div className="relative">
+                            <Loader2 className="w-5 h-5 animate-spin text-purple-400" />
+                            <div className="absolute inset-0 w-5 h-5 border-2 border-purple-400/20 rounded-full"></div>
+                          </div>
+                          <div className="flex flex-col">
+                            <span className="text-sm font-medium">AI is thinking...</span>
+                            <span className="text-xs text-gray-400">Searching and analyzing when needed</span>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1250,45 +1349,58 @@ sys.stderr = _old_stderr
 
             {/* Search Status */}
             {lastSearchInfo && messages.length > 0 && (
-              <div className="mb-4 p-3 bg-white/5 border border-white/10 rounded-lg">
-                <div className="flex items-center justify-between text-sm">
-                  <div className="flex items-center gap-2 text-gray-400">
+              <div className="mb-4 p-4 bg-gradient-to-r from-white/5 to-white/10 border border-white/10 rounded-lg backdrop-blur-sm">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
                     {lastSearchInfo.performed ? (
                       <>
-                        <Search className="w-4 h-4 text-green-400" />
-                        <span>Searched for current information</span>
-                        {lastSearchInfo.query && (
-                          <span className="text-purple-300">"{lastSearchInfo.query}"</span>
-                        )}
+                        <div className="w-8 h-8 bg-green-500/20 rounded-full flex items-center justify-center">
+                          <Search className="w-4 h-4 text-green-400" />
+                        </div>
+                        <div className="flex flex-col">
+                          <span className="text-sm font-medium text-gray-200">Live search performed</span>
+                          {lastSearchInfo.query && (
+                            <span className="text-xs text-purple-300">"{lastSearchInfo.query}"</span>
+                          )}
+                        </div>
                       </>
                     ) : (
                       <>
-                        <MessageCircle className="w-4 h-4 text-blue-400" />
-                        <span>Used existing knowledge</span>
+                        <div className="w-8 h-8 bg-blue-500/20 rounded-full flex items-center justify-center">
+                          <MessageCircle className="w-4 h-4 text-blue-400" />
+                        </div>
+                        <div className="flex flex-col">
+                          <span className="text-sm font-medium text-gray-200">Used existing knowledge</span>
+                          <span className="text-xs text-gray-400">No search needed</span>
+                        </div>
                       </>
                     )}
                   </div>
-                  <span className="text-gray-500">
-                    {lastSearchInfo.responseTime.toFixed(2)}s
-                  </span>
+                  <div className="text-right">
+                    <div className="text-xs text-gray-400">Response time</div>
+                    <div className="text-sm font-mono text-gray-300">
+                      {lastSearchInfo.responseTime.toFixed(2)}s
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
 
             {/* Input Form */}
-            <form onSubmit={handleSubmit} className="flex gap-2">
-              <div className="flex-1">
+            <div className="mt-auto">
+              <form onSubmit={handleSubmit} className="flex gap-3">
+              <div className="flex-1 relative">
                 <input
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder={activeCodeId ? "Keep the conversation going or ask for code edits..." : "Type your message..."}
-                  className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
+                  placeholder={activeCodeId ? "Continue the conversation or request code changes..." : "Ask me anything or request code generation..."}
+                  className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-all duration-200 backdrop-blur-sm"
                   disabled={loading}
                   maxLength={450}
                 />
                 {input.length > 350 && (
-                  <div className={`text-xs mt-1 ${input.length > 430 ? 'text-red-400' : 'text-yellow-400'}`}>
+                  <div className={`absolute -bottom-6 right-0 text-xs ${input.length > 430 ? 'text-red-400' : 'text-yellow-400'}`}>
                     {input.length}/450 characters
                   </div>
                 )}
@@ -1296,7 +1408,7 @@ sys.stderr = _old_stderr
               <button
                 type="submit"
                 disabled={loading || !input.trim() || input.length > 450}
-                className="px-6 py-3 bg-purple-600 hover:bg-purple-700 disabled:bg-gray-600 rounded-lg transition-colors"
+                className="px-6 py-3 bg-gradient-to-r from-purple-600 to-purple-700 hover:from-purple-700 hover:to-purple-800 disabled:from-gray-600 disabled:to-gray-700 rounded-lg transition-all duration-200 transform hover:scale-105 disabled:scale-100 shadow-lg"
               >
                 {loading ? (
                   <Loader2 className="w-5 h-5 text-white animate-spin" />
@@ -1308,13 +1420,14 @@ sys.stderr = _old_stderr
                 <button
                   type="button"
                   onClick={clearChat}
-                  className="px-4 py-3 bg-red-600 hover:bg-red-700 rounded-lg transition-colors"
+                  className="px-4 py-3 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-700 hover:to-red-800 rounded-lg transition-all duration-200 transform hover:scale-105 shadow-lg"
                   title="Clear conversation"
                 >
                   <Trash2 className="w-5 h-5 text-white" />
                 </button>
               )}
             </form>
+            </div>
 
             {/* Error Message */}
             {error && (
