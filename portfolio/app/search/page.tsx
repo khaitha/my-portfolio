@@ -343,8 +343,15 @@ export default function SearchPage() {
   // Set API URL after component mounts
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const port = window.location.hostname === 'localhost' ? '8000' : '8000'
-      setApiUrl(`http://${window.location.hostname}:${port}`)
+      const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+      
+      if (isProduction) {
+        // Use HTTPS in production and match your Digital Ocean API structure
+        setApiUrl(`https://${window.location.hostname}/my-portfolio-portfolio-api`)
+      } else {
+        // Use HTTP in development
+        setApiUrl(`http://localhost:8000`)
+      }
     }
   }, [])
 
