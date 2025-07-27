@@ -343,15 +343,8 @@ export default function SearchPage() {
   // Set API URL after component mounts
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
-      
-      if (isProduction) {
-        // Use HTTPS in production and match your Digital Ocean API structure
-        setApiUrl(`https://${window.location.hostname}/my-portfolio-portfolio-api`)
-      } else {
-        // Use HTTP in development
-        setApiUrl(`http://localhost:8000`)
-      }
+      // Always use Next.js API routes for consistency between dev and prod
+      setApiUrl('/api')
     }
   }, [])
 
@@ -824,6 +817,9 @@ sys.stderr = _old_stderr
       // Handle different actions based on AI analysis
       switch (analysis.action) {
         case 'generate':
+          // Clear search info when doing code generation
+          setLastSearchInfo(null)
+          
           // Initialize Python if needed for code generation
           if (!pyodideReady && !pyodideLoading) {
             setCodeSessionActive(true)
@@ -869,6 +865,9 @@ sys.stderr = _old_stderr
           break
 
         case 'edit':
+          // Clear search info when editing code
+          setLastSearchInfo(null)
+          
           if (activeCodeId && codeContext) {
             const editResult = await generateOrEditCode(userMessage, codeContext)
             
@@ -908,6 +907,9 @@ sys.stderr = _old_stderr
           break
 
         case 'execute':
+          // Clear search info when executing code
+          setLastSearchInfo(null)
+          
           if (activeCodeId) {
             if (!pyodideReady) {
               setMessages([...newMessages, { 
@@ -947,6 +949,9 @@ sys.stderr = _old_stderr
           break
 
         case 'revert':
+          // Clear search info when reverting code
+          setLastSearchInfo(null)
+          
           if (activeCodeId && analysis.context?.versionRequest) {
             const steps = analysis.context.versionRequest.steps || 1
             const success = revertToPreviousVersion(activeCodeId, steps)
