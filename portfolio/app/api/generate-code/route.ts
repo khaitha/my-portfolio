@@ -42,9 +42,22 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('API error:', error)
     
+    // More detailed error logging for production debugging
+    if (error instanceof Error) {
+      console.error('Error message:', error.message)
+      console.error('Error stack:', error.stack)
+    }
+    
     if (error instanceof Error && error.message.includes('ECONNREFUSED')) {
       return NextResponse.json(
-        { error: 'Service unavailable. Please ensure the backend service is running.' },
+        { error: 'Backend service unavailable. Please try again later.' },
+        { status: 503 }
+      )
+    }
+    
+    if (error instanceof Error && error.message.includes('fetch')) {
+      return NextResponse.json(
+        { error: 'Failed to connect to code generation service. Please try again.' },
         { status: 503 }
       )
     }
