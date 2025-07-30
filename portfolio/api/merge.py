@@ -203,6 +203,7 @@ class ChatWithSearchRequest(BaseModel):
     messages: List[ChatMessage]  # Change from single message to message history
     search_when_needed: Optional[bool] = True
     num_search_results: Optional[int] = 5
+    session_id: Optional[str] = None
 
 class ChatWithSearchResponse(BaseModel):
     ai_response: str
@@ -495,8 +496,8 @@ class AISearchEngine:
             logger.error(f"AI response generation failed: {e}")
             return f"Based on the search results for '{query}', I found {len(search_results)} relevant sources. Please check the provided links for detailed information."
 
-    def should_search(self, messages: List[ChatMessage]) -> tuple[bool, str]:
-        """Determine if a search is needed based on conversation context"""
+    def should_search(self, messages: List[ChatMessage], pdf_context: Optional[Dict] = None) -> tuple[bool, str]:
+        """Enhanced search decision with PDF context awareness"""
         try:
             # Get the latest user message
             latest_message = ""
@@ -508,49 +509,100 @@ class AISearchEngine:
             if not latest_message:
                 return False, ""
             
-            # Use AI to determine if search is needed
-            analysis_prompt = [
-                {"role": "system", "content": """Analyze the user's latest message in this conversation and determine if it requires current/recent information that might not be in your training data.
+            # Check for job market, salary, career, or industry questions
+            job_market_keywords = [
+                'job market', 'career opportunities', 'salary', 'employment', 'hiring',
+                'market demand', 'job prospects', 'career outlook', 'industry trends',
+                'best chance', 'most likely', 'highest paying', 'in demand jobs',
+                'market today', 'current job', 'job availability', 'employment rate'
+            ]
+            
+            # Check for tech industry or skill demand questions
+            tech_market_keywords = [
+                'tech jobs', 'programming jobs', 'developer jobs', 'data science jobs',
+                'AI jobs', 'machine learning jobs', 'software engineer jobs',
+                'tech industry', 'programming market', 'developer market',
+                'skills in demand', 'tech skills', 'programming skills demand'
+            ]
+            
+            # Check if this is a job/career question that could benefit from current data
+            is_job_question = any(keyword in latest_message.lower() for keyword in job_market_keywords + tech_market_keywords)
+            
+            # Enhanced AI prompt that considers PDF context and job market questions
+            system_prompt = """Analyze the user's latest message and determine if it requires current/recent information that might not be in your training data.
 
-                Consider searching if the message asks about:
-                - Current events, news, or recent developments
-                - Current statistics, prices, or data
-                - Recent changes in laws, policies, or regulations  
-                - Current status of people, companies, or organizations
-                - Weather, sports scores, or time-sensitive information
-                - Technology updates or recent releases
-                - Current political situations or leaders
+            ALWAYS SEARCH for these types of questions:
+            - Current job market trends, salary data, or hiring statistics
+            - What jobs are in demand right now or career opportunities today
+            - Current technology industry trends or skill demand
+            - Recent changes in employment, remote work, or workplace trends
+            - Current events, news, or recent developments
+            - Current statistics, prices, or data that changes frequently
+            - Recent changes in laws, policies, or regulations
+            - Weather, sports scores, or time-sensitive information
+            - Technology updates or recent releases
 
-                Respond with EXACTLY:
-                SEARCH: [specific search query] - if search is needed
-                NO_SEARCH - if your existing knowledge is sufficient
-                Examples:
-                "Who is the current president?" → SEARCH: current president 2025
-                "What is 2+2?" → NO_SEARCH
-                "Latest news about AI?" → SEARCH: latest AI news 2025
-                "Explain photosynthesis" → NO_SEARCH"""}, 
-                {
-                "role": "user", "content": f"Latest user message: '{latest_message}'"
-                            }
-                        ]
+            ESPECIALLY SEARCH when:
+            - User asks about job prospects, career opportunities, or market demand
+            - Questions about "what jobs", "best chance", "market today", "in demand"
+            - Salary questions or employment statistics
+            - Tech industry trends or programming job market
 
-            # Convert to string format for current model
-            prompt_text = f"{analysis_prompt[0]['content']}\n\nUser message: '{latest_message}'"
+            NO SEARCH needed for:
+            - General knowledge questions (math, science concepts, history)
+            - Definitions or explanations of concepts
+            - Programming tutorials or code examples
+            - Basic career advice not requiring current data
+
+            Respond with EXACTLY:
+            SEARCH: [specific search query] - if search is needed
+            NO_SEARCH - if your existing knowledge is sufficient
+
+            Examples:
+            "What job on the market today will this person have the best chance?" → SEARCH: current job market trends 2025 tech skills demand
+            "What programming jobs are in high demand?" → SEARCH: programming jobs high demand 2025 developer hiring trends
+            "What is machine learning?" → NO_SEARCH
+            "Current salary for data scientists?" → SEARCH: data scientist salary 2025 current market"""
+            
+            # Check if we have PDF context to enhance the search query
+            pdf_info = ""
+            if pdf_context and pdf_context.get("content"):
+                # Extract key skills/experience from PDF context for better search
+                pdf_content = pdf_context.get("content", "")[:500]  # First 500 chars for context
+                pdf_info = f"\n\nPDF Context Available: The user has uploaded a document containing skills/experience information. If this is a job/career question, consider searching for current market information relevant to the skills mentioned in their document."
+            
+            prompt_text = f"{system_prompt}{pdf_info}\n\nUser message: '{latest_message}'"
+            
             response = self.model.generate_content(prompt_text)
             response_text = response.text.strip()
             
+            # Enhanced search query generation for job market questions
             if response_text.startswith("SEARCH:"):
                 search_query = response_text.replace("SEARCH:", "").strip()
+                
+                # If it's a job question but the search query is generic, enhance it
+                if is_job_question and pdf_context:
+                    # Extract key skills from PDF for more targeted search
+                    pdf_content = pdf_context.get("content", "")
+                    if any(skill in pdf_content.lower() for skill in ['python', 'machine learning', 'data science', 'web development', 'javascript']):
+                        if 'tech' not in search_query.lower():
+                            search_query += " tech industry programming"
+                
                 return True, search_query
             else:
+                # Force search for obvious job market questions even if AI says no
+                if is_job_question:
+                    enhanced_query = f"current job market trends 2025 {latest_message}"
+                    logger.info(f"Forcing search for job market question: {enhanced_query}")
+                    return True, enhanced_query
+                
                 return False, ""
                 
         except Exception as e:
             logger.error(f"Search decision analysis failed: {e}")
-            # Fallback: simple keyword detection
-            current_keywords = ["current", "latest", "recent", "today", "now", "2024", "2025", "president", "news"]
-            if any(keyword in latest_message.lower() for keyword in current_keywords):
-                return True, latest_message
+            # Fallback: if there's an error but it's clearly a job market question, search anyway
+            if any(keyword in latest_message.lower() for keyword in ['job', 'career', 'salary', 'market', 'demand', 'hiring']):
+                return True, f"job market trends 2025 {latest_message}"
             return False, ""
 
     def generate_chat_response_with_search(self, messages: List[ChatMessage], search_results: List[Dict]) -> str:
@@ -629,6 +681,115 @@ class AISearchEngine:
         except Exception as e:
             logger.error(f"Chat response generation failed: {e}")
             return "I'm having trouble processing your message right now. Could you try rephrasing it?"
+
+    def generate_response_with_pdf_and_search(self, messages: List[ChatMessage], search_results: List[Dict], pdf_context: Dict) -> str:
+        """Generate response combining PDF context with current search results"""
+        try:
+            # Get the latest user message
+            latest_message = ""
+            for msg in reversed(messages):
+                if msg.role == "user":
+                    latest_message = msg.content
+                    break
+            
+            # Format search results
+            sources_text = "\n\n".join([
+                f"Source {result['rank']}: {result['title']}\n"
+                f"URL: {result['url']}\n"
+                f"Content: {result['snippet']}"
+                for result in search_results
+            ])
+            
+            # Extract PDF information
+            pdf_content = pdf_context.get("content", "")[:8000]  # Limit PDF content for prompt
+            pdf_filename = pdf_context.get("filename", "document")
+            
+            # Build conversation context
+            conversation_context = ""
+            if len(messages) > 1:
+                recent_messages = messages[-4:]  # Last 4 messages for context
+                for msg in recent_messages[:-1]:  # Exclude the latest message
+                    role_label = "User" if msg.role == "user" else "Assistant"
+                    conversation_context += f"{role_label}: {msg.content}\n"
+            
+            prompt = f"""You are a helpful AI assistant having a conversation with a user. The user has uploaded a document ({pdf_filename}) and is asking: "{latest_message}"
+
+I found current information from web search:
+{sources_text}
+
+I also have context from the user's uploaded document:
+Document excerpt: {pdf_content}
+
+Previous conversation:
+{conversation_context}
+
+Guidelines:
+- Combine information from BOTH the uploaded document AND the current search results
+- For job/career questions: Use the document's skills/experience with current market data
+- Reference specific information from both sources
+- Be practical and actionable in your recommendations
+- If search results provide current market trends, mention how they relate to the document content
+- Keep the response conversational and helpful
+
+User question: {latest_message}"""
+
+            response = self.model.generate_content(prompt)
+            return clean_response(response.text or "I couldn't combine the PDF information with current search results.")
+            
+        except Exception as e:
+            logger.error(f"Combined PDF and search response generation failed: {e}")
+            return f"I found current information and have your document context, but had trouble combining them. Please check the search sources provided for current details."
+
+    def generate_pdf_response_with_search_fallback(self, messages: List[ChatMessage], pdf_context: Dict, failed_query: str) -> str:
+        """Generate response using PDF context when search fails but was requested"""
+        try:
+            # Get the latest user message
+            latest_message = ""
+            for msg in reversed(messages):
+                if msg.role == "user":
+                    latest_message = msg.content
+                    break
+            
+            # Extract PDF information
+            pdf_content = pdf_context.get("content", "")
+            pdf_filename = pdf_context.get("filename", "document")
+            
+            # Build conversation context
+            conversation_history = ""
+            for msg in messages:
+                conversation_history += f"{msg.role}: {msg.content}\n"
+            
+            prompt = f"""You are a helpful AI assistant. The user has uploaded a document ({pdf_filename}) and asked: "{latest_message}"
+
+I tried to find current information with the search query "{failed_query}" but couldn't retrieve current results. However, I can analyze the uploaded document and provide insights based on its content combined with my existing knowledge.
+
+Document content:
+{pdf_content[:10000]}
+
+Conversation history:
+{conversation_history}
+
+Guidelines:
+- Analyze the document content thoroughly
+- If this is about job/career opportunities, use the skills/experience from the document
+- Provide the best advice possible using the document + your general knowledge
+- Acknowledge that you tried to find current information but couldn't access it
+- Suggest specific areas where the person could look for current information
+- Be helpful and actionable despite the search limitation
+
+Provide a helpful response that maximizes the value of the document content."""
+
+            response = self.model.generate_content(prompt)
+            result = clean_response(response.text or "I couldn't access current information, but I can analyze your document.")
+            
+            # Add note about search attempt
+            result += f"\n\n(Note: I tried to find current market information but couldn't access search results. The above analysis is based on your document and general knowledge.)"
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"PDF fallback response generation failed: {e}")
+            return "I couldn't access current information and had trouble analyzing your document. Could you try rephrasing your question?"
 
 # Initialize search engine
 search_engine = AISearchEngine()
@@ -971,49 +1132,98 @@ async def chat_with_search(request: ChatWithSearchRequest):
                 raise HTTPException(400, "Message too long. Maximum 500 characters.")
             
             logger.info(f"Processing chat-search with {len(request.messages)} messages")
+            logger.info(f"Session ID received: {request.session_id}")
+            logger.info(f"Available sessions in store: {list(pdf_context_store.keys())}")
+            
+            # Check for PDF context if session_id is provided
+            pdf_context = None
+            if request.session_id and request.session_id in pdf_context_store:
+                pdf_context = pdf_context_store[request.session_id]
+                logger.info(f"Found PDF context for session: {request.session_id}")
+                logger.info(f"PDF filename: {pdf_context.get('filename', 'Unknown')}")
+            elif request.session_id:
+                logger.warning(f"Session ID {request.session_id} not found in PDF context store")
+            else:
+                logger.info("No session ID provided, proceeding with regular chat")
             
             search_performed = False
             search_query = None
             sources_used = []
             ai_response = ""
             
-            # Determine if search is needed
+            # ENHANCED LOGIC: Check if search is needed FIRST, regardless of PDF context
+            should_search_result = False
+            extracted_query = ""
+            
             if request.search_when_needed:
-                should_search, extracted_query = search_engine.should_search(request.messages)
+                should_search_result, extracted_query = search_engine.should_search(request.messages, pdf_context)
+                logger.info(f"Search analysis: should_search={should_search_result}, query='{extracted_query}'")
+            
+            # If search is needed, perform it regardless of PDF context
+            if should_search_result and extracted_query:
+                logger.info(f"Search determined necessary. Query: {extracted_query}")
+                search_performed = True
+                search_query = extracted_query
                 
-                if should_search and extracted_query:
-                    logger.info(f"Search determined necessary. Query: {extracted_query}")
-                    search_performed = True
-                    search_query = extracted_query
+                # Perform search
+                search_results = search_engine.search_duckduckgo(extracted_query, request.num_search_results)
+                
+                if search_results:
+                    logger.info(f"Found {len(search_results)} search results for chat")
                     
-                    # Perform search
-                    search_results = search_engine.search_duckduckgo(extracted_query, request.num_search_results)
+                    # Convert to response format
+                    sources_used = [
+                        SearchResult(
+                            title=result["title"],
+                            url=result["url"],
+                            snippet=result["snippet"],
+                            rank=result["rank"]
+                        )
+                        for result in search_results
+                    ]
                     
-                    if search_results:
-                        logger.info(f"Found {len(search_results)} search results for chat")
-                        
-                        # Generate response with search results
-                        ai_response = search_engine.generate_chat_response_with_search(request.messages, search_results)
-                        
-                        # Convert to response format
-                        sources_used = [
-                            SearchResult(
-                                title=result["title"],
-                                url=result["url"],
-                                snippet=result["snippet"],
-                                rank=result["rank"]
-                            )
-                            for result in search_results
-                        ]
+                    # Generate response combining search results with PDF context if available
+                    if pdf_context:
+                        # Combine PDF context with search results for enhanced response
+                        ai_response = search_engine.generate_response_with_pdf_and_search(
+                            request.messages, search_results, pdf_context)
                     else:
-                        # No search results found, use existing knowledge
+                        # Generate response with search results only
+                        ai_response = search_engine.generate_chat_response_with_search(request.messages, search_results)
+                else:
+                    # No search results found, fall back to PDF or general knowledge
+                    if pdf_context:
+                        ai_response = search_engine.generate_pdf_response_with_search_fallback(
+                            request.messages, pdf_context, extracted_query)
+                    else:
                         ai_response = search_engine.generate_chat_response_without_search(request.messages)
                         ai_response += "\n\n(Note: I tried to find current information but couldn't retrieve search results.)"
-                else:
-                    logger.info("No search needed, using existing knowledge")
-                    ai_response = search_engine.generate_chat_response_without_search(request.messages)
+            
+            # If no search needed, use PDF context or general knowledge
+            elif pdf_context:
+                # For PDF context without search, use direct chat with PDF content
+                try:
+                    conversation_history = ""
+                    for msg in request.messages:
+                        conversation_history += f"{msg.role}: {msg.content}\n"
+                    
+                    # Extract the content from the PDF context dictionary
+                    pdf_content = pdf_context.get("content", "")
+                    prompt = CHAT_WITH_PDF_PROMPT.format(pdf_content=pdf_content[:15000]) + conversation_history
+                    
+                    response = chat_model.generate_content(prompt)
+                    ai_response = clean_response(response.text or "I couldn't process your question about the PDF.")
+                    
+                    logger.info("Generated PDF-based response (no search needed)")
+                    
+                except Exception as e:
+                    logger.error(f"PDF chat failed: {str(e)}")
+                    logger.error(f"PDF context structure: {type(pdf_context)}")
+                    ai_response = "I'm having trouble accessing the PDF content right now. Could you try rephrasing your question?"
+            
+            # If no PDF context and no search needed, use general knowledge
             else:
-                # Search disabled, use existing knowledge
+                # Search disabled or no search needed, use existing knowledge
                 ai_response = search_engine.generate_chat_response_without_search(request.messages)
             
             response_time = time.time() - start_time
@@ -1315,16 +1525,26 @@ def analyze_code_action_fallback(user_message: str, has_active_code: bool) -> di
     """Fallback analysis using keyword matching when AI parsing fails"""
     user_message_lower = user_message.lower()
     
-    # Check for simple requests first (higher priority)
-    simple_keywords = ['hello', 'hello world', 'print hello', 'print hi']
-    generate_keywords = ['print', 'calculate', 'create', 'write', 'make', 'generate', 'show', 'display', 'code']
+    # Much stricter code generation - require explicit programming language or very specific requests
+    strict_code_keywords = [
+        'write python code', 'create python code', 'generate python code', 'python code for',
+        'write javascript', 'create javascript', 'write a function', 'create a function',
+        'python script', 'javascript function', 'write a program', 'create a program',
+        'coding challenge', 'programming challenge', 'algorithm implementation'
+    ]
+    
+    # Only very basic programming examples (and only specific ones)
+    simple_programming_keywords = [
+        'print hello world', 'hello world code', 'fibonacci code', 'factorial code'
+    ]
+    
     edit_keywords = ['change', 'modify', 'update', 'edit', 'alter', 'fix']
     execute_keywords = ['run', 'execute', 'try', 'test']
     revert_keywords = ['back', 'previous', 'undo', 'revert', 'before']
-    question_keywords = ['what', 'how', 'why', 'explain', '?']
+    question_keywords = ['what', 'how', 'why', 'explain', '?', 'job', 'career', 'market', 'recommend', 'suggest']
     plotting_keywords = ['plot', 'chart', 'graph', 'visualize', 'matplotlib', 'seaborn', 'histogram', 'scatter']
     
-    # Determine action based on keywords (prioritize simple over plotting)
+    # Determine action based on keywords (prioritize questions over code generation)
     if any(keyword in user_message_lower for keyword in revert_keywords):
         action = "revert"
         confidence = 0.8
@@ -1334,21 +1554,21 @@ def analyze_code_action_fallback(user_message: str, has_active_code: bool) -> di
     elif any(keyword in user_message_lower for keyword in execute_keywords):
         action = "execute"
         confidence = 0.8
-    elif any(keyword in user_message_lower for keyword in simple_keywords):
+    elif any(keyword in user_message_lower for keyword in strict_code_keywords):
         action = "generate"
-        confidence = 0.9  # High confidence for simple requests
-    elif any(keyword in user_message_lower for keyword in generate_keywords):
-        action = "generate"
-        confidence = 0.6
+        confidence = 0.9  # High confidence for explicit programming requests
+    elif any(keyword in user_message_lower for keyword in simple_programming_keywords):
+        action = "generate" 
+        confidence = 0.8  # High confidence for simple programming examples
     elif any(keyword in user_message_lower for keyword in question_keywords):
         action = "question"
-        confidence = 0.5
+        confidence = 0.9  # High confidence for questions
     else:
-        action = "generate"  # Default fallback
-        confidence = 0.3
+        action = "question"  # Default to question instead of generate
+        confidence = 0.7  # Prefer questions over code generation
     
-    # Check for plotting context (but don't let it override simple requests)
-    is_plotting_related = any(keyword in user_message_lower for keyword in plotting_keywords) and not any(keyword in user_message_lower for keyword in simple_keywords)
+    # Check for plotting context (but don't let it override explicit programming requests)
+    is_plotting_related = any(keyword in user_message_lower for keyword in plotting_keywords) and not any(keyword in user_message_lower for keyword in simple_programming_keywords)
     
     return {
         "action": action,

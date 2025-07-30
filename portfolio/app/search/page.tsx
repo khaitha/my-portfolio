@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Search, Loader2, ExternalLink, MessageCircle, Trash2, Code, Play, Terminal, Edit3, X, Copy, Check, AlertCircle, RotateCcw } from 'lucide-react'
+import { Search, Loader2, ExternalLink, MessageCircle, Trash2, Code, Play, Terminal, Edit3, X, Copy, Check, AlertCircle, RotateCcw, Upload, File, FileText } from 'lucide-react'
 
 declare global {
   interface Window {
@@ -74,6 +74,27 @@ interface CodeActionAnalysis {
   }
 }
 
+// PDF-related interfaces
+interface UploadResponse {
+  result: string
+  session_id: string
+  filename: string
+  message: string
+  is_mid_conversation: boolean
+  total_pages?: number
+  total_chunks?: number
+  document_size?: string
+  processing_method?: string
+}
+
+interface PDFContext {
+  sessionId: string
+  filename: string
+  summary: string
+  isActive: boolean
+  uploadedAt: number
+}
+
 export default function SearchPage() {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -98,6 +119,11 @@ export default function SearchPage() {
   const [loadedPackages, setLoadedPackages] = useState<Set<string>>(new Set())
   const [copiedCode, setCopiedCode] = useState<string | null>(null)
   const [executionProgress, setExecutionProgress] = useState<number>(0)
+
+  // PDF upload states
+  const [pdfContext, setPdfContext] = useState<PDFContext | null>(null)
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState('')
 
   // Refs for auto-scroll
   const messagesEndRef = useRef<HTMLDivElement>(null)
@@ -405,6 +431,10 @@ export default function SearchPage() {
   const analyzeCodeActionFallback = (userMessage: string, hasActiveCode: boolean): CodeActionAnalysis => {
     const lowerText = userMessage.toLowerCase()
     
+    // If PDF context is active, be VERY strict about code generation
+    // Only generate code for explicit programming requests
+    const hasPdfContext = !!pdfContext
+    
     // Version/revert detection
     const versionKeywords = [
       'go back', 'previous version', 'revert', 'undo', 'roll back', 'restore',
@@ -421,23 +451,30 @@ export default function SearchPage() {
       'make it', 'turn it into', 'convert to', 'switch to'
     ]
     
-    const simpleCodeKeywords = [
-      'print', 'hello world', 'calculate', 'compute', 'solve', 'algorithm',
-      'function', 'write code', 'create code', 'generate code', 'program',
-      'fibonacci', 'factorial', 'prime', 'sum', 'loop', 'list', 'string'
+    // Much more strict code generation keywords - require explicit programming language
+    const strictCodeKeywords = [
+      'write python code', 'create python code', 'generate python code', 'python code for',
+      'write javascript', 'create javascript', 'write a function', 'create a function',
+      'code to calculate', 'python script', 'javascript function', 'write a program',
+      'create a program', 'python program', 'coding challenge', 'programming challenge'
+    ]
+    
+    // Simple code keywords - only use when NO PDF context
+    const simpleCodeKeywords = hasPdfContext ? [] : [
+      'print hello world', 'hello world code', 'fibonacci code', 'factorial code',
+      'prime number code', 'calculate fibonacci', 'write fibonacci'
     ]
     
     const plottingKeywords = [
       'bar chart', 'line chart', 'pie chart', 'histogram', 'scatter plot',
       'plot', 'graph', 'chart', 'visualize', 'visualization', 'matplotlib',
-      'draw a', 'create a chart', 'show a graph', 'make a plot'
+      'draw a chart', 'create a chart', 'show a graph', 'make a plot'
     ]
     
-    // Check for explicit new code generation requests (higher priority)
-    const newCodeKeywords = [
-      'create a', 'make a', 'generate a', 'write a', 'do a', 'another',
-      'different', 'new', 'fresh', 'different ascii', 'another face',
-      'create ascii', 'make ascii', 'do another'
+    // Much more explicit code generation requests
+    const explicitCodeKeywords = [
+      'write code', 'create code', 'generate code', 'code example',
+      'programming example', 'implement', 'algorithm implementation'
     ]
     
     // Check for version requests
@@ -463,15 +500,6 @@ export default function SearchPage() {
       }
     }
     
-    // Check for NEW CODE generation requests (prioritize over edit)
-    if (newCodeKeywords.some(kw => lowerText.includes(kw))) {
-      return {
-        action: 'generate',
-        confidence: 0.9,
-        context: { isPlottingRelated: plottingKeywords.some(kw => lowerText.includes(kw)) }
-      }
-    }
-    
     // Check for edit requests (only if not asking for new code)
     if (hasActiveCode && editKeywords.some(kw => lowerText.includes(kw))) {
       return {
@@ -481,27 +509,46 @@ export default function SearchPage() {
       }
     }
     
-    // Check for plotting requests FIRST (before simple code) to ensure proper classification
-    if (plottingKeywords.some(kw => lowerText.includes(kw))) {
+    // STRICT code generation - only for explicit programming requests
+    if (strictCodeKeywords.some(kw => lowerText.includes(kw))) {
       return {
         action: 'generate',
-        confidence: 0.7,
+        confidence: 0.9,
+        context: { isPlottingRelated: plottingKeywords.some(kw => lowerText.includes(kw)) }
+      }
+    }
+    
+    // Explicit code requests (but lower confidence when PDF is active)
+    if (explicitCodeKeywords.some(kw => lowerText.includes(kw))) {
+      return {
+        action: 'generate',
+        confidence: hasPdfContext ? 0.3 : 0.7, // Much lower confidence with PDF
+        context: { isPlottingRelated: plottingKeywords.some(kw => lowerText.includes(kw)) }
+      }
+    }
+    
+    // Plotting requests (only if explicit)
+    if (plottingKeywords.some(kw => lowerText.includes(kw)) && !hasPdfContext) {
+      return {
+        action: 'generate',
+        confidence: 0.6,
         context: { isPlottingRelated: true }
       }
     }
     
-    // Check for simple code generation requests (like "print hello world")
+    // Simple code requests (only when NO PDF context)
     if (simpleCodeKeywords.some(kw => lowerText.includes(kw))) {
       return {
         action: 'generate',
-        confidence: 0.85,
+        confidence: 0.8,
         context: { isPlottingRelated: false }
       }
     }
     
+    // Default to question/chat when PDF context is available or no clear code intent
     return {
       action: 'question',
-      confidence: 0.6,
+      confidence: hasPdfContext ? 0.9 : 0.6, // High confidence for questions when PDF is active
       context: {}
     }
   }
@@ -564,6 +611,64 @@ export default function SearchPage() {
     
     const lowerCode = code.toLowerCase()
     return plottingKeywords.some(keyword => lowerCode.includes(keyword))
+  }
+
+  // PDF Upload functionality
+  const handlePdfUpload = async (file: File): Promise<void> => {
+    if (!apiUrl) {
+      setUploadError('API not available')
+      return
+    }
+
+    setUploading(true)
+    setUploadError('')
+
+    try {
+      const formData = new FormData()
+      formData.append('file', file)
+
+      const response = await fetch(`${apiUrl}/upload`, {
+        method: 'POST',
+        body: formData
+      })
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.statusText}`)
+      }
+
+      const data: UploadResponse = await response.json()
+      
+      // Create PDF context
+      const newPdfContext: PDFContext = {
+        sessionId: data.session_id,
+        filename: data.filename,
+        summary: data.result,
+        isActive: true,
+        uploadedAt: Date.now()
+      }
+
+      setPdfContext(newPdfContext)
+
+      // Add a message to the chat showing the PDF was uploaded
+      const uploadMessage: ChatMessage = {
+        role: 'assistant',
+        content: `📄 **PDF Uploaded Successfully**\n\n**File:** ${data.filename}\n\n**Summary:**\n${data.result}\n\nYou can now ask questions about this document!`
+      }
+
+      setMessages(prev => [...prev, uploadMessage])
+
+    } catch (error: any) {
+      console.error('PDF Upload error:', error)
+      setUploadError(error.message || 'Upload failed')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  // Clear PDF context
+  const clearPdfContext = () => {
+    setPdfContext(null)
+    setUploadError('')
   }
 
   // Add version to code session
@@ -831,13 +936,37 @@ sys.stderr = _old_stderr
     setMessages(newMessages)
 
     try {
-      // Analyze user intent for code-related actions
+      // Get code context for potential use later
       const codeContext = activeCodeId ? codeSessions.find(s => s.id === activeCodeId)?.code : undefined
-      const analysis = await analyzeCodeAction(userMessage, !!activeCodeId, codeContext)
       
-      console.log('Code action analysis:', analysis) // Debug log
-      console.log('Has active code:', !!activeCodeId) // Debug log
-      console.log('User message:', userMessage) // Debug log
+      // When PDF context is active, only analyze for explicit code requests
+      // Skip analysis for general questions to avoid code generation
+      const shouldAnalyzeForCode = !pdfContext || 
+        /write.*code|create.*code|generate.*code|python|javascript|function|program|script/.test(userMessage.toLowerCase())
+      
+      let analysis: CodeActionAnalysis
+      
+      if (shouldAnalyzeForCode) {
+        // Analyze user intent for code-related actions
+        analysis = await analyzeCodeAction(userMessage, !!activeCodeId, codeContext)
+      } else {
+        // For PDF context questions, force it to be a question
+        analysis = {
+          action: 'question',
+          confidence: 0.95,
+          context: {}
+        }
+      }
+      
+      console.log('🔍 Analysis Debug:')
+      console.log('  - Action:', analysis.action)
+      console.log('  - Confidence:', analysis.confidence)
+      console.log('  - Has active code:', !!activeCodeId)
+      console.log('  - Has PDF context:', !!pdfContext)
+      console.log('  - PDF filename:', pdfContext?.filename || 'None')
+      console.log('  - Should analyze for code:', shouldAnalyzeForCode)
+      console.log('  - User message:', userMessage)
+      console.log('  - Analysis:', analysis)
 
       // Handle different actions based on AI analysis
       switch (analysis.action) {
@@ -1035,7 +1164,8 @@ sys.stderr = _old_stderr
         body: JSON.stringify({ 
           messages: newMessages,
           search_when_needed: true,
-          num_search_results: 5
+          num_search_results: 5,
+          session_id: pdfContext?.sessionId || undefined
         }),
       })
 
@@ -1046,7 +1176,13 @@ sys.stderr = _old_stderr
       const data: ChatWithSearchResponse = await response.json()
       
       // Add assistant response to conversation
-      setMessages([...newMessages, { role: 'assistant', content: data.ai_response }])
+      const assistantMessage: ChatMessage = {
+        role: 'assistant',
+        content: pdfContext 
+          ? `📄 **Based on ${pdfContext.filename}:**\n\n${data.ai_response}`
+          : data.ai_response
+      }
+      setMessages([...newMessages, assistantMessage])
       
       // Store search info for display
       setLastSearchInfo({
@@ -1184,6 +1320,69 @@ sys.stderr = _old_stderr
             Intelligent Assistant. Chat, Search, and Code in Python.
           </p>
           
+          {/* PDF Upload Section */}
+          <div className="mt-6 flex justify-center">
+            <div className="flex items-center gap-4 bg-white/10 backdrop-blur-sm border border-white/20 rounded-xl p-4 max-w-2xl">
+              {!pdfContext ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-purple-400" />
+                    <span className="text-white font-medium">Upload PDF</span>
+                  </div>
+                  <label className="flex items-center gap-2 bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg cursor-pointer transition-colors">
+                    <Upload className="w-4 h-4 text-white" />
+                    <span className="text-white">Choose File</span>
+                    <input
+                      type="file"
+                      accept=".pdf"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0]
+                        if (file) {
+                          handlePdfUpload(file)
+                          e.target.value = ''
+                        }
+                      }}
+                      className="hidden"
+                      disabled={uploading}
+                    />
+                  </label>
+                  {uploading && (
+                    <div className="flex items-center gap-2 text-blue-400">
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                      <span className="text-sm">Uploading...</span>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-green-400" />
+                    <div className="text-left">
+                      <div className="text-white font-medium text-sm">{pdfContext.filename}</div>
+                      <div className="text-green-400 text-xs">PDF Active</div>
+                    </div>
+                  </div>
+                  <button
+                    onClick={clearPdfContext}
+                    className="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-white text-sm transition-colors flex items-center gap-1"
+                  >
+                    <X className="w-3 h-3" />
+                    Remove
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+          
+          {uploadError && (
+            <div className="mt-4 max-w-2xl mx-auto">
+              <div className="bg-red-500/20 border border-red-500/30 rounded-lg p-3 text-red-200 text-sm flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" />
+                <span>{uploadError}</span>
+              </div>
+            </div>
+          )}
+          
           {/* Enhanced Python Status */}
           {codeSessionActive && (
             <div className="mt-4 flex justify-center">
@@ -1219,11 +1418,19 @@ sys.stderr = _old_stderr
           <MessageCircle className="w-5 h-5 text-purple-400" />
           <h2 className="text-xl font-semibold text-white">Chat</h2>
               </div>
-              {codeSessionActive && (
-          <div className="text-xs text-gray-400">
-            AI Code Assistant Active →
-          </div>
-              )}
+              <div className="flex items-center gap-3">
+                {pdfContext && (
+                  <div className="text-xs bg-green-500/20 text-green-400 px-2 py-1 rounded-full flex items-center gap-1">
+                    <FileText className="w-3 h-3" />
+                    PDF Active
+                  </div>
+                )}
+                {codeSessionActive && (
+                  <div className="text-xs text-gray-400">
+                    AI Code Assistant Active →
+                  </div>
+                )}
+              </div>
             </div>
             
             {/* Chat History */}
@@ -1238,7 +1445,7 @@ sys.stderr = _old_stderr
                     <MessageCircle className="w-10 h-10 opacity-50" />
                   </div>
                   <h3 className="text-lg font-medium text-white mb-4">Start your AI conversation</h3>
-                  <p className="text-gray-400 mb-6">Ask me anything or request code generation</p>
+                  <p className="text-gray-400 mb-6">Ask me anything, upload PDFs, or request code generation</p>
                   <div className="text-sm space-y-2 bg-white/5 rounded-lg p-4 max-w-sm mx-auto">
                     <div className="flex items-center gap-2 text-purple-300">
                       <div className="w-2 h-2 bg-purple-400 rounded-full"></div>
@@ -1251,6 +1458,10 @@ sys.stderr = _old_stderr
                     <div className="flex items-center gap-2 text-green-300">
                       <div className="w-2 h-2 bg-green-400 rounded-full"></div>
                       <span>Code editing: "Change the function"</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-orange-300">
+                      <div className="w-2 h-2 bg-orange-400 rounded-full"></div>
+                      <span>PDF chat: Upload documents above</span>
                     </div>
                     <div className="flex items-center gap-2 text-purple-400 font-medium mt-3">
                       <span>🤖</span>
@@ -1394,7 +1605,13 @@ sys.stderr = _old_stderr
                   type="text"
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
-                  placeholder={activeCodeId ? "Continue the conversation or request code changes..." : "Ask me anything or request code generation..."}
+                  placeholder={
+                    pdfContext 
+                      ? `Ask questions about ${pdfContext.filename} or anything else...`
+                      : activeCodeId 
+                        ? "Continue the conversation or request code changes..." 
+                        : "Ask me anything, upload PDFs, or request code generation..."
+                  }
                   className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-all duration-200 backdrop-blur-sm"
                   disabled={loading}
                   maxLength={450}

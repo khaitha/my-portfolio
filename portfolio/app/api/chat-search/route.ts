@@ -12,14 +12,14 @@ export async function POST(request: NextRequest) {
     }
 
     // Chat-search request
-    const { messages, search_when_needed = true, num_search_results = 5 } = body
+    const { messages, search_when_needed = true, num_search_results = 5, session_id } = body
     
     if (!messages || !Array.isArray(messages)) {
       return NextResponse.json({ error: 'No messages provided' }, { status: 400 })
     }
 
-    const payload = { messages, search_when_needed, num_search_results }
-    console.log('Forwarding chat-search request with', messages.length, 'messages')
+    const payload = { messages, search_when_needed, num_search_results, session_id }
+    console.log('Forwarding chat-search request with', messages.length, 'messages', session_id ? `and session_id: ${session_id}` : '')
 
     // Build API URL
     const apiUrl = process.env.NODE_ENV === 'production' 
