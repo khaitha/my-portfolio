@@ -119,6 +119,7 @@ export default function SearchPage() {
   const [loadedPackages, setLoadedPackages] = useState<Set<string>>(new Set())
   const [copiedCode, setCopiedCode] = useState<string | null>(null)
   const [executionProgress, setExecutionProgress] = useState<number>(0)
+  const [codeMode, setCodeMode] = useState(false) // NEW: Code mode toggle
 
   // PDF upload states
   const [pdfContext, setPdfContext] = useState<PDFContext | null>(null)
@@ -331,6 +332,7 @@ export default function SearchPage() {
     setEditingCode('')
     setCodeSessionActive(false)
     setCopiedCode(null)
+    setCodeMode(false) // Turn off code mode when clearing sessions
     
     // Reset Python environment
     resetPyodideCompletely()
@@ -939,10 +941,8 @@ sys.stderr = _old_stderr
       // Get code context for potential use later
       const codeContext = activeCodeId ? codeSessions.find(s => s.id === activeCodeId)?.code : undefined
       
-      // When PDF context is active, only analyze for explicit code requests
-      // Skip analysis for general questions to avoid code generation
-      const shouldAnalyzeForCode = !pdfContext || 
-        /write.*code|create.*code|generate.*code|python|javascript|function|program|script/.test(userMessage.toLowerCase())
+      // Only analyze for code when code mode is explicitly activated
+      const shouldAnalyzeForCode = codeMode
       
       let analysis: CodeActionAnalysis
       
@@ -950,7 +950,7 @@ sys.stderr = _old_stderr
         // Analyze user intent for code-related actions
         analysis = await analyzeCodeAction(userMessage, !!activeCodeId, codeContext)
       } else {
-        // For PDF context questions, force it to be a question
+        // When code mode is off, always treat as regular questions
         analysis = {
           action: 'question',
           confidence: 0.95,
@@ -961,6 +961,7 @@ sys.stderr = _old_stderr
       console.log('🔍 Analysis Debug:')
       console.log('  - Action:', analysis.action)
       console.log('  - Confidence:', analysis.confidence)
+      console.log('  - Code mode active:', codeMode)
       console.log('  - Has active code:', !!activeCodeId)
       console.log('  - Has PDF context:', !!pdfContext)
       console.log('  - PDF filename:', pdfContext?.filename || 'None')
@@ -1599,6 +1600,38 @@ sys.stderr = _old_stderr
 
             {/* Input Form */}
             <div className="mt-auto">
+              {/* Code Mode Toggle */}
+              <div className="mb-3 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCodeMode(!codeMode)
+                      if (!codeMode) {
+                        // When activating code mode, clear any non-code context
+                        setLastSearchInfo(null)
+                      }
+                    }}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg transition-all duration-200 transform hover:scale-105 ${
+                      codeMode 
+                        ? 'bg-gradient-to-r from-green-600 to-green-700 text-white shadow-lg' 
+                        : 'bg-white/10 border border-white/20 text-gray-300 hover:bg-white/20'
+                    }`}
+                  >
+                    <Code className={`w-4 h-4 ${codeMode ? 'text-white' : 'text-gray-400'}`} />
+                    <span className="text-sm font-medium">
+                      {codeMode ? 'Code Mode ON' : 'Code Mode OFF'}
+                    </span>
+                  </button>
+                  {codeMode && (
+                    <div className="text-xs text-green-400 flex items-center gap-1">
+                      <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
+                      Ready for code generation
+                    </div>
+                  )}
+                </div>
+              </div>
+              
               <form onSubmit={handleSubmit} className="flex gap-3">
               <div className="flex-1 relative">
                 <input
@@ -1606,11 +1639,13 @@ sys.stderr = _old_stderr
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   placeholder={
-                    pdfContext 
-                      ? `Ask questions about ${pdfContext.filename} or anything else...`
-                      : activeCodeId 
-                        ? "Continue the conversation or request code changes..." 
-                        : "Ask me anything, upload PDFs, or request code generation..."
+                    codeMode
+                      ? activeCodeId 
+                        ? "Request code changes, ask to run code, or continue conversation..."
+                        : "Describe what code you want me to generate..."
+                      : pdfContext 
+                        ? `Ask questions about ${pdfContext.filename} or anything else...`
+                        : "Ask me anything or upload PDFs for analysis..."
                   }
                   className="w-full px-4 py-3 bg-white/10 border border-white/20 rounded-lg text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-all duration-200 backdrop-blur-sm"
                   disabled={loading}
